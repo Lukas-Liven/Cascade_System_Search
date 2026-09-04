@@ -1,3 +1,5 @@
+import sys
+
 import pandas as pd
 import os
 import requests
@@ -37,7 +39,13 @@ dam_inventory = dam_inventory.dropna(subset=['Max Storage (Acre-Ft)', 'Longitude
 dam_inventory = dam_inventory[dam_inventory['NID ID'] == dam_inventory['Federal ID']] # This removes associated structures so the primary dam is kept and prioritized instead of being missed in favor of a component. 
 dam_inventory = dam_inventory[dam_inventory['Max Storage (Acre-Ft)'] > 100] # Remove dams with storage less than 100 acre-feet, as they are unlikely to be significant for hydroelectric power generation and cascades.
 
-df_hydroelectric = dam_inventory[dam_inventory['Purposes'].str.contains('Hydroelectric', case=False, na=False)] # Any dam that contains hydroelectric as one of its purposes
+def is_hydroelectric(purposes) -> bool:
+    """
+    Shared helper: determine whether a dam's Purposes string indicates
+    it is hydroelectric, tolerant of NaN/None input.
+    """
+    return bool(pd.notna(purposes) and 'Hydroelectric' in str(purposes))
+df_hydroelectric = dam_inventory[dam_inventory['Purposes'].apply(is_hydroelectric)] # Any dam that contains hydroelectric as one of its purposes
 
 print(f"Total dams with coordinates: {len(dam_inventory)}")
 print(f"Hydroelectric dams: {len(df_hydroelectric)}")
@@ -130,17 +138,18 @@ dam_inventory['node_id'] = dam_inventory['node_id'].fillna(
     dam_inventory['NID ID'].map(resnet_node_map)
 )
 still_missing_after = dam_inventory['node_id'].isna().sum()
+found = dam_inventory['node_id'].notna().sum()
 
 print(f"Dams recovered via ResNet crosswalk: {still_missing_before - still_missing_after}")
 print(f"Updated match rate: "
         f"{(len(dam_inventory) - still_missing_after) / len(dam_inventory) * 100:.1f}%")
+sys.exit()
 
 # --- Filtering to dams with nodes ---
 dam_inventory_matched = dam_inventory.dropna(subset=['node_id']).copy()
 dam_inventory_matched['node_id'] = dam_inventory_matched['node_id'].astype(int)
-dam_inventory_matched = dam_inventory_matched.drop_duplicates(subset='NID ID', keep='first')
 
-hydroelectric_dams_matched = dam_inventory_matched[dam_inventory_matched['Purposes'].str.contains('Hydroelectric', case=False, na=False)]
+hydroelectric_dams_matched = dam_inventory_matched[dam_inventory_matched['Purposes'].apply(is_hydroelectric)]
 
 # We're looking for hydroelectric dams that surpass a certain power capacity threshold, which is calculated as Hydraulic Height (Ft) * Max Discharge (Cubic Ft/Second) / POWER_CONVERSION_FACTOR. 
 # Dams that do not meet this threshold are filtered out as potential roots, but still included in the cascade search if they are downstream of a qualifying root.
@@ -159,33 +168,12 @@ dam_nodes = set(dam_inventory_matched['node_id'])
 
 # This mapping is going to be used in our downstream search to quickly look up the NID ID of a dam given its node ID.
 node_to_damid = (
-    dam_inventory_matched
-    .set_index('node_id')['NID ID']
-    .to_dict()
-)
-
-def explore_node_dams(node_id: int) -> None:
-    """
-    Display all dams at a specific node
-    """
-    dams_at_node = dam_inventory_matched[dam_inventory_matched['node_id'] == node_id]
-
-    if len(dams_at_node) == 0:
-        print(f"No dams found at node {node_id}")
-        return
-
-    print(f"\n{'='*60}")
-    print(f"Node ID: {node_id}")
-    print(f"Number of dams: {len(dams_at_node)}")
-    print(f"Location: ({dams_at_node.iloc[0]['Latitude']}, {dams_at_node.iloc[0]['Longitude']})")
-    print(f"{'='*60}\n")
-
-    for idx, dam in dams_at_node.iterrows():
-        print(f"Dam: {dam['Dam Name']}")
-        print(f"  NID ID: {dam['NID ID']}")
-        print(f"  Purposes: {dam['Purposes']}")
-        print(f"  Operational Status: {dam['Operational Status']}")
-        print()
+        dam_inventory_matched
+        .assign(_is_hydro=dam_inventory_matched['Purposes'].apply(is_hydroelectric))
+        .sort_values('_is_hydro', ascending=True)  # False (0) sorts first, True (1) sorts last
+        .set_index('node_id')['NID ID']
+        .to_dict()
+    )
 
 LENGTH_ATTR = 'lengthkm' # This is the attribute name in the river network graph that stores the length of each edge in kilometers.
 KM_TO_MILES = 0.621371 # Conversion factor from kilometers to miles, which we chose to use for distance calculations in the downstream search function.
@@ -264,13 +252,6 @@ damid_to_owner = (
     .to_dict()
 )
 
-def is_hydroelectric_purpose(purposes) -> bool:
-    """
-    Shared helper: determine whether a dam's Purposes string indicates
-    it is hydroelectric, tolerant of NaN/None input.
-    """
-    return bool(pd.notna(purposes) and 'Hydroelectric' in str(purposes))
-
 def get_segment_distance_miles(graph, start_node: int, end_node: int) -> float|None:
     """
     Compute the downstream river distance (in miles) between two specific
@@ -347,7 +328,7 @@ if not os.path.exists(DOWNSTREAM_LINKS_CSV):
 CASCADE_SYSTEMS_CSV = 'cascading_systems.csv'
 CASCADE_SYSTEMS_SUMMARY_CSV = 'cascading_systems_summary.csv'
 MIN_HYDROELECTRIC_DAMS_PER_CASCADE = 2
-REQUIRE_SAME_OWNER = False
+REQUIRE_SAME_OWNER = True
 
 # NOTE: changing MIN_HYDROELECTRIC_DAMS_PER_CASCADE or REQUIRE_SAME_OWNER
 # requires deleting the existing cascading_systems.csv (and
@@ -364,9 +345,6 @@ if not os.path.exists(CASCADE_SYSTEMS_CSV):
     downstream_map = dict(zip(df_links['Dam'], df_links['Downstream Dam']))
 
     root_candidate_ids = set(hydroelectric_dams_matched_filtered['NID ID'])
-
-    def is_hydroelectric(dam_id):
-        return is_hydroelectric_purpose(damid_to_purposes.get(dam_id))
 
     def same_owner(dam_id_a, dam_id_b) -> bool:
         owner_a = damid_to_owner.get(dam_id_a)
@@ -429,7 +407,7 @@ if not os.path.exists(CASCADE_SYSTEMS_CSV):
     cascades = [c for c in cascades if len(c) >= 2]
 
     def count_hydroelectric(chain: list) -> int:
-        return sum(1 for dam_id in chain if is_hydroelectric(dam_id))
+        return sum(1 for dam_id in chain if is_hydroelectric(damid_to_purposes.get(dam_id)))
 
     cascades = [c for c in cascades if count_hydroelectric(c) >= MIN_HYDROELECTRIC_DAMS_PER_CASCADE]
 
@@ -485,7 +463,7 @@ if not os.path.exists(CASCADE_SYSTEMS_CSV):
             incoming[b] = incoming.get(b, 0) + 1
         root_dams_in_system = sorted(n for n in nodes if incoming.get(n, 0) == 0)
 
-        hydro_count = sum(1 for n in nodes if is_hydroelectric(n))
+        hydro_count = sum(1 for n in nodes if is_hydroelectric(damid_to_purposes.get(n)))
 
         # System ID: the alphanumerically smallest root dam in the
         # merged group -- gives each system a stable, human-recognizable
@@ -580,25 +558,46 @@ def build_cascade_graph(system_id, cascade_csv=CASCADE_SYSTEMS_CSV):
                     name=row[f'{prefix} Dam Name'],
                     purposes=row[f'{prefix} Dam Purposes'],
                     owner=row[f'{prefix} Dam Owner'],
-                    is_hydroelectric=is_hydroelectric_purpose(row[f'{prefix} Dam Purposes'])
+                    is_hydroelectric=is_hydroelectric(row[f'{prefix} Dam Purposes'])
                 )
 
         distance_str = row['Distance (Miles)']
         distance = float(distance_str) if pd.notna(distance_str) and distance_str != '' else None
         G.add_edge(row['Upstream Dam ID'], row['Downstream Dam ID'], distance_miles=distance)
 
-    # Latitude/longitude aren't repeated across every edge row in the
-    # CSV (to avoid redundant duplication), so they're joined in here
-    # from dam_inventory_matched instead.
+    # The edge-list CSV only carries a handful of fields per dam (enough to
+    # build the graph structure itself). Since these graphs are being
+    # persisted as a standalone reference dataset, every other field
+    # available in dam_inventory_matched is merged in here as well, so a
+    # node loaded later from cascade_graphs.pkl carries the FULL NID record
+    # for that dam, not just what was needed to construct the CSV.
     matched_indexed = dam_inventory_matched.set_index('NID ID')
     for dam_id in G.nodes:
         if dam_id not in matched_indexed.index:
             raise ValueError(
-                f"Dam '{dam_id}' not found in dam_inventory_matched -- cannot resolve coordinates."
+                f"Dam '{dam_id}' not found in dam_inventory_matched -- cannot resolve full record."
             )
         dam_row = matched_indexed.loc[dam_id]
-        G.nodes[dam_id]['latitude'] = dam_row['Latitude']
-        G.nodes[dam_id]['longitude'] = dam_row['Longitude']
+
+        # Convert the full row to a plain dict, normalizing NaN -> None so
+        # the stored node data doesn't carry pandas/numpy NaN sentinels into
+        # what is meant to be a general-purpose, pickle-persisted reference
+        # structure (None serializes more predictably across contexts than
+        # float('nan'), which notably does not equal itself).
+        full_attrs = {
+            key: (None if pd.isna(value) else value)
+            for key, value in dam_row.to_dict().items()
+        }
+
+        # The NID ID itself is the graph's node key (dam_id) rather than a
+        # column in dam_row (since it was used as the DataFrame index via
+        # set_index above), but it's also stored explicitly as a property
+        # here -- standard practice for a graph-database-style reference,
+        # where a node's identifier is typically retrievable as a property
+        # of the node, not only as its key.
+        full_attrs['NID ID'] = dam_id
+
+        G.nodes[dam_id].update(full_attrs)
 
     return G
 
@@ -643,8 +642,8 @@ if os.path.exists(CASCADE_SYSTEMS_CSV):
         print(f"System {system_id}: {G.number_of_nodes()} dams, "
                 f"{len(roots)} root(s), {len(sinks)} terminus/termini")
 
-        avg_lat = sum(attrs['latitude'] for _, attrs in G.nodes(data=True)) / G.number_of_nodes()
-        avg_lon = sum(attrs['longitude'] for _, attrs in G.nodes(data=True)) / G.number_of_nodes()
+        avg_lat = sum(attrs['Latitude'] for _, attrs in G.nodes(data=True)) / G.number_of_nodes()
+        avg_lon = sum(attrs['Longitude'] for _, attrs in G.nodes(data=True)) / G.number_of_nodes()
 
         m = folium.Map(location=[avg_lat, avg_lon], zoom_start=8)
 
@@ -661,7 +660,7 @@ if os.path.exists(CASCADE_SYSTEMS_CSV):
             hydro_label = "Hydroelectric" if attrs['is_hydroelectric'] else "Non-hydroelectric"
 
             folium.Marker(
-                location=[attrs['latitude'], attrs['longitude']],
+                location=[attrs['Latitude'], attrs['Longitude']],
                 popup=f"{attrs['name']} ({dam_id}) -- {hydro_label}"
                         f"<br>Owner: {attrs['owner']}"
                         f"<br>Purposes: {attrs['purposes']}",
@@ -670,8 +669,8 @@ if os.path.exists(CASCADE_SYSTEMS_CSV):
             ).add_to(m)
 
         for dam_id_a, dam_id_b, edge_attrs in G.edges(data=True):
-            coord_a = (G.nodes[dam_id_a]['latitude'], G.nodes[dam_id_a]['longitude'])
-            coord_b = (G.nodes[dam_id_b]['latitude'], G.nodes[dam_id_b]['longitude'])
+            coord_a = (G.nodes[dam_id_a]['Latitude'], G.nodes[dam_id_a]['Longitude'])
+            coord_b = (G.nodes[dam_id_b]['Latitude'], G.nodes[dam_id_b]['Longitude'])
 
             distance = edge_attrs['distance_miles']
             distance_label = f"{distance:.2f} river miles" if distance is not None else "distance unavailable"
@@ -805,7 +804,7 @@ def print_cascade_graph(system_id: str, cascade_graphs: dict) -> nx.DiGraph:
     for node_id, attrs in G.nodes(data=True):
         tag = "[hydroelectric]" if attrs['is_hydroelectric'] else "[non-hydroelectric]"
         print(f"  {tag} {node_id}: {attrs['name']!r} "
-                f"(owner={attrs['owner']}, lat={attrs['latitude']}, lon={attrs['longitude']})")
+                f"(owner={attrs['owner']}, lat={attrs['Latitude']}, lon={attrs['Longitude']})")
 
     print("\nEdges:")
     for u, v, edge_attrs in G.edges(data=True):
@@ -857,8 +856,8 @@ def build_conus_cascade_map(cascade_graphs, output_file=CONUS_MAP_FILE,
     all_lats, all_lons = [], []
     for G in cascade_graphs.values():
         for _, attrs in G.nodes(data=True):
-            all_lats.append(attrs['latitude'])
-            all_lons.append(attrs['longitude'])
+            all_lats.append(attrs['Latitude'])
+            all_lons.append(attrs['Longitude'])
 
     center = [(min(all_lats) + max(all_lats)) / 2, (min(all_lons) + max(all_lons)) / 2]
 
@@ -877,7 +876,7 @@ def build_conus_cascade_map(cascade_graphs, output_file=CONUS_MAP_FILE,
 
         # --- Markers ---
         for dam_id, attrs in G.nodes(data=True):
-            lat, lon = attrs['latitude'], attrs['longitude']
+            lat, lon = attrs['Latitude'], attrs['Longitude']
 
             if dam_id in roots:
                 color = 'green'
@@ -912,8 +911,8 @@ def build_conus_cascade_map(cascade_graphs, output_file=CONUS_MAP_FILE,
             u_name = G.nodes[u]['name']
             v_name = G.nodes[v]['name']
 
-            loc_u = (G.nodes[u]['latitude'], G.nodes[u]['longitude'])
-            loc_v = (G.nodes[v]['latitude'], G.nodes[v]['longitude'])
+            loc_u = (G.nodes[u]['Latitude'], G.nodes[u]['Longitude'])
+            loc_v = (G.nodes[v]['Latitude'], G.nodes[v]['Longitude'])
 
             folium.PolyLine(
                 locations=[loc_u, loc_v],
@@ -965,7 +964,6 @@ def build_conus_cascade_map(cascade_graphs, output_file=CONUS_MAP_FILE,
     print(f"Saved CONUS cascade map with {len(cascade_graphs)} systems to {output_file}")
 
     return m
-
 
 # --- Build the national overview map ---
 build_conus_cascade_map(cascade_graphs)
