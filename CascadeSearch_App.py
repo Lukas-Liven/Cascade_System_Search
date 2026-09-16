@@ -44,9 +44,39 @@ from typing import Any, Callable, Optional
 import pandas as pd
 import requests
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 import html
 import webbrowser
+import aiohttp
+
+def configure_aiohttp_dns_resolver() -> None:
+    """
+    Force aiohttp to use Python's standard threaded DNS resolver.
+
+    The HyRiver dependency chain used by pynhd and pygeohydro includes:
+
+        async-retriever -> aiodns -> pycares
+
+    On this Windows environment, aiodns/pycares fails to contact DNS servers
+    even though Windows DNS resolution and HTTPS connectivity work normally.
+    
+    aiohttp.ThreadedResolver() uses Python socket/getaddrinfo resolution rather
+    than aiodns/pycares, which has been verified to work in this environment.
+
+    This must execute before importing pynhd or pygeohydro so their dependent
+    HTTP clients use the corrected aiohttp default resolver.
+    """
+
+    threaded_resolver = aiohttp.ThreadedResolver
+
+    # aiohttp.resolver.DefaultResolver is normally an alias selected at import
+    # time. When aiodns is installed, it resolves to AsyncResolver, which uses
+    # pycares. Replace that alias with ThreadedResolver.
+    aiohttp.resolver.DefaultResolver = threaded_resolver
+    aiohttp.connector.DefaultResolver = threaded_resolver
+    aiohttp.DefaultResolver = threaded_resolver
+
+configure_aiohttp_dns_resolver()
 
 import geopandas as gpd
 import pynhd
@@ -86,6 +116,28 @@ NHD_GRAPH_CACHE_NAME = "nhd_enhd_network.pkl"
 CACHE_METADATA_NAME = "cache_metadata.json"
 RESNET_CACHE_NAME = RESNET_FILENAME
 
+# Application-managed raw NID inventory cache. This is separate from
+# pygeohydro's own cache so the application can explicitly recover from a
+# failed live NID request, including DNS/service outages.
+NID_INVENTORY_CACHE_NAME = "nid_inventory_raw.pkl"
+# ---------------------------------------------------------------------------
+# Application-managed workflow artifact constants
+# ---------------------------------------------------------------------------
+
+# These pickle files are application cache artifacts, not files intended for
+# manual user editing. They are saved in the private application cache folder.
+DOWNSTREAM_LINKS_CACHE_NAME = "downstream_dam_pairs.pkl"
+CASCADE_SYSTEMS_CACHE_NAME = "cascading_systems.pkl"
+
+# CSV files are now optional, user-readable exports only. The application must
+# never read these CSV files as an operational dependency.
+DEFAULT_DOWNSTREAM_LINKS_EXPORT_NAME = "downstream_dam_pairs.csv"
+DEFAULT_CASCADE_SYSTEMS_EXPORT_NAME = "cascading_systems.csv"
+DEFAULT_CASCADE_SUMMARY_EXPORT_NAME = "cascading_systems_summary.csv"
+
+# Increment this whenever the structure of a saved artifact changes in an
+# incompatible way.
+WORKFLOW_ARTIFACT_SCHEMA_VERSION = 1
 # ---------------------------------------------------------------------------
 # Data structures and exceptions
 # ---------------------------------------------------------------------------
@@ -196,6 +248,126 @@ def atomic_write_bytes(destination: Path, data: bytes) -> None:
         # If a failure occurred before os.replace, remove the temporary file.
         if temporary.exists():
             temporary.unlink(missing_ok=True)
+
+def save_application_artifact(
+    artifact_file: Path,
+    artifact_type: str,
+    payload: dict[str, Any],
+) -> None:
+    """
+    Persist an application-managed artifact in the private cache directory.
+
+    Pickle is appropriate here because the artifact may contain DataFrames and
+    NetworkX DiGraphs. It is not appropriate for user-supplied files.
+
+    Security rule:
+    - This application only writes and later loads artifacts in its own
+      user-private cache directory.
+    - Never add a UI feature that loads arbitrary user-selected pickle files.
+    """
+
+    artifact = {
+        "schema_version": WORKFLOW_ARTIFACT_SCHEMA_VERSION,
+        "artifact_type": artifact_type,
+        "created_unix_time": time.time(),
+        "payload": payload,
+    }
+
+    serialized_artifact = pickle.dumps(
+        artifact,
+        protocol=pickle.HIGHEST_PROTOCOL,
+    )
+
+    # atomic_write_bytes already uses a temporary file and os.replace(), so
+    # incomplete writes are never treated as valid cache files.
+    atomic_write_bytes(
+        artifact_file,
+        serialized_artifact,
+    )
+
+
+def load_application_artifact(
+    artifact_file: Path,
+    expected_artifact_type: str,
+) -> dict[str, Any]:
+    """
+    Load and validate an application-managed pickle artifact.
+
+    This function must only be called for files within the application's
+    private cache directory. Pickle content must be considered trusted only
+    when the application itself created the file.
+    """
+
+    if not artifact_file.exists():
+        raise FileNotFoundError(
+            f"Application artifact does not exist: {artifact_file}"
+        )
+
+    ensure_pickle_cache_is_private(artifact_file)
+
+    with open(artifact_file, "rb") as input_file:
+        artifact = pickle.load(input_file)
+
+    if not isinstance(artifact, dict):
+        raise DataValidationError(
+            f"Invalid artifact structure in {artifact_file.name}."
+        )
+
+    if artifact.get("schema_version") != WORKFLOW_ARTIFACT_SCHEMA_VERSION:
+        raise DataValidationError(
+            f"Artifact schema mismatch for {artifact_file.name}. "
+            "Rebuild the artifact using the current application version."
+        )
+
+    if artifact.get("artifact_type") != expected_artifact_type:
+        raise DataValidationError(
+            f"Unexpected artifact type in {artifact_file.name}."
+        )
+
+    payload = artifact.get("payload")
+
+    if not isinstance(payload, dict):
+        raise DataValidationError(
+            f"Invalid payload structure in {artifact_file.name}."
+        )
+
+    return payload
+
+
+def export_dataframe_to_csv(
+    dataframe: pd.DataFrame,
+    output_file: Path,
+) -> None:
+    """
+    Export a DataFrame as a user-readable CSV.
+
+    The CSV is not an application input or source of truth. It is an optional
+    research export that may be reviewed, edited, or shared without affecting
+    the application's cached operational artifacts.
+
+    Existing sanitize_csv_cell() protection is retained to reduce spreadsheet
+    formula-injection risk when CSV files are opened in Excel-like software.
+    """
+
+    temporary_file = output_file.with_suffix(output_file.suffix + ".tmp")
+    export_dataframe = dataframe.copy()
+
+    for column_name in export_dataframe.columns:
+        export_dataframe[column_name] = export_dataframe[column_name].map(
+            sanitize_csv_cell
+        )
+
+    try:
+        export_dataframe.to_csv(
+            temporary_file,
+            index=False,
+            encoding="utf-8",
+        )
+
+        os.replace(temporary_file, output_file)
+
+    finally:
+        temporary_file.unlink(missing_ok=True)
 
 def write_cache_metadata(cache_dir: Path) -> None:
     """Record the cache schema version without storing sensitive information."""
@@ -617,6 +789,12 @@ class InitializationService:
         self.nhd_cache = self.cache_dir / NHD_GRAPH_CACHE_NAME
         self.geoconnex_cache = self.cache_dir / GEOCONNEX_CACHE_NAME
         self.resnet_cache = self.cache_dir / RESNET_CACHE_NAME
+        # Raw NID inventory saved after a successful live pygeohydro retrieval.
+        # If the upstream NID service is unavailable later, this is the
+        # application-controlled fallback used to continue initialization.
+        self.nid_inventory_cache = (
+            self.cache_dir / NID_INVENTORY_CACHE_NAME
+        )
 
     def load_or_download_nhd_network(self) -> tuple[Any, dict[Any, int]]:
         """
@@ -721,14 +899,26 @@ class InitializationService:
 
     def load_nid_inventory(self) -> pd.DataFrame:
         """
-        Acquire NID through pygeohydro and apply only the basic current filters.
+        Acquire the raw National Inventory of Dams and apply baseline filters.
 
-        pygeohydro manages its own NID download/cache. Subsequent application
-        stages will expose additional filtering through the user interface.
+        Normal behavior:
+        1. Request current NID data using pygeohydro.
+        2. Save the successful raw DataFrame to the application-managed cache.
+        3. Apply application filtering and return the resulting inventory.
+
+        Resiliency behavior:
+        - If pygeohydro cannot reach the NID service, such as during DNS,
+          HTTPS, server, or temporary network failure, load the most recently
+          successful application-managed NID cache instead.
+        - The cached raw inventory is subjected to the same field validation
+          and filtering as a live response.
+
+        Security:
+        - The fallback artifact is loaded only from this application's private
+          cache directory through load_application_artifact().
+        - Do not expose a UI feature that lets users select arbitrary pickle
+          files, because pickle is unsafe for untrusted input.
         """
-
-        self.log("Loading National Inventory of Dams through pygeohydro...")
-        dam_inventory = gh.NID().df.copy()
 
         required_columns = {
             "NID ID",
@@ -737,32 +927,157 @@ class InitializationService:
             "Longitude",
             "Latitude",
         }
-        missing_columns = required_columns - set(dam_inventory.columns)
-        if missing_columns:
-            raise DataValidationError(
-                f"NID data is missing required columns: {sorted(missing_columns)}"
+
+        raw_nid_inventory: pd.DataFrame
+        source_description: str
+
+        try:
+            self.log(
+                "Loading National Inventory of Dams through pygeohydro..."
             )
 
-        # Normalize identifiers before comparing NID ID and Federal ID. This
-        # preserves the original workflow's primary-structure preference.
-        dam_inventory["NID ID"] = dam_inventory["NID ID"].map(normalize_identifier)
-        dam_inventory["Federal ID"] = dam_inventory["Federal ID"].map(normalize_identifier)
+            # pygeohydro may use its own internal cache, but the call can still
+            # attempt remote access. A DNS failure here is handled by the
+            # application-owned fallback cache below.
+            raw_nid_inventory = gh.NID().df.copy()
+
+            if not isinstance(raw_nid_inventory, pd.DataFrame):
+                raise DataValidationError(
+                    "pygeohydro returned an invalid NID inventory structure."
+                )
+
+            missing_columns = required_columns - set(
+                raw_nid_inventory.columns
+            )
+
+            if missing_columns:
+                raise DataValidationError(
+                    "Live NID data are missing required columns: "
+                    f"{sorted(missing_columns)}"
+                )
+
+            # Persist the unfiltered source data. Current and future filtering
+            # behavior therefore remains consistent whether data came from a
+            # live source or a prior successful cache.
+            save_application_artifact(
+                artifact_file=self.nid_inventory_cache,
+                artifact_type="nid_inventory_raw",
+                payload={
+                    "nid_inventory": raw_nid_inventory,
+                },
+            )
+
+            source_description = "live pygeohydro/NID data"
+
+            self.log(
+                "NID data loaded successfully and saved to the "
+                "application-managed fallback cache."
+            )
+
+        except Exception as live_error:
+            # Keep the original reason in the log. This makes it clear that
+            # initialization continued from cached data rather than silently
+            # claiming the NID service was reached.
+            self.log(
+                "Unable to retrieve live NID data; attempting the "
+                f"application-managed NID cache. Reason: {live_error}"
+            )
+
+            try:
+                cached_payload = load_application_artifact(
+                    artifact_file=self.nid_inventory_cache,
+                    expected_artifact_type="nid_inventory_raw",
+                )
+
+                cached_inventory = cached_payload.get("nid_inventory")
+
+                if not isinstance(cached_inventory, pd.DataFrame):
+                    raise DataValidationError(
+                        "The cached NID artifact does not contain a valid DataFrame."
+                    )
+
+                missing_columns = required_columns - set(
+                    cached_inventory.columns
+                )
+
+                if missing_columns:
+                    raise DataValidationError(
+                        "Cached NID data are missing required columns: "
+                        f"{sorted(missing_columns)}"
+                    )
+
+                # Make a fresh in-memory copy. This ensures the normalization
+                # and filtering below never mutate the cached artifact object.
+                raw_nid_inventory = cached_inventory.copy()
+                source_description = "application-managed cached NID data"
+
+                self.log(
+                    "Live NID retrieval was unavailable. Continuing with the "
+                    "most recently cached NID inventory."
+                )
+
+            except Exception as cache_error:
+                raise DataValidationError(
+                    "Could not retrieve live NID data and no valid "
+                    "application-managed NID cache was available. "
+                    f"Live retrieval error: {live_error}. "
+                    f"Cache recovery error: {cache_error}."
+                ) from cache_error
+
+        # Work from the validated live-or-cache raw dataset. Everything below
+        # deliberately applies identically for both acquisition paths.
+        dam_inventory = raw_nid_inventory.copy()
+
+        # Normalize identifiers before comparing them. This retains only
+        # primary dam records, excluding associated structures:
+        #
+        #     NID ID == Federal ID
+        #
+        dam_inventory["NID ID"] = dam_inventory["NID ID"].map(
+            normalize_identifier
+        )
+        dam_inventory["Federal ID"] = dam_inventory["Federal ID"].map(
+            normalize_identifier
+        )
 
         dam_inventory["Max Storage (Acre-Ft)"] = pd.to_numeric(
             dam_inventory["Max Storage (Acre-Ft)"],
             errors="coerce",
         )
 
+        # A valid NID identifier, coordinates, and storage value are required
+        # for later mapping, filtering, and visualization. User-controlled
+        # minimum storage filtering remains in Part 3.
         dam_inventory = dam_inventory.dropna(
-            subset=["NID ID", "Max Storage (Acre-Ft)", "Longitude", "Latitude"]
+            subset=[
+                "NID ID",
+                "Max Storage (Acre-Ft)",
+                "Longitude",
+                "Latitude",
+            ]
         )
+
+        # Automatic baseline condition from the original cascade algorithm:
+        # preserve the main/primary NID record and remove associated structures.
         dam_inventory = dam_inventory[
             dam_inventory["NID ID"] == dam_inventory["Federal ID"]
-        ]
+        ].copy()
 
-        self.log(f"NID inventory ready after basic filters: {len(dam_inventory):,} dams.")
+        # Stable unique NID IDs are necessary for downstream maps, cascade
+        # graphs, and Part 6 dam-ID searches.
+        dam_inventory = dam_inventory.drop_duplicates(
+            subset=["NID ID"],
+            keep="first",
+        )
+
+        self.log(
+            "NID inventory ready from "
+            f"{source_description} after required-field and primary-dam "
+            f"filters: {len(dam_inventory):,} dams."
+        )
+
         return dam_inventory
-
+    
     @staticmethod
     def build_geoconnex_damid_to_comid(geo_dams: gpd.GeoDataFrame) -> dict[str, int]:
         """Create normalized NID/provider ID -> COMID mappings from GeoConnex."""
@@ -885,6 +1200,15 @@ class CascadeResearchApp(tk.Tk):
         self.geometry("1040x720")
 
         self.cache_dir = get_application_cache_directory()
+        # Application-managed workflow artifacts. These files are the
+        # persistent equivalents of the in-memory Part 4 and Part 5 results.
+        # They are not user-editable workflow inputs.
+        self.downstream_links_cache_path = (
+            self.cache_dir / DOWNSTREAM_LINKS_CACHE_NAME
+        )
+        self.cascade_systems_cache_path = (
+            self.cache_dir / CASCADE_SYSTEMS_CACHE_NAME
+        )
         self.initialization_result: Optional[InitializationResult] = None
 
         # Part 3 creates researcher-selected subsets from the initialized
@@ -898,7 +1222,9 @@ class CascadeResearchApp(tk.Tk):
         # table. Parts 5 and 6 will later use this table to construct and
         # inspect cascade systems.
         self.downstream_links: Optional[pd.DataFrame] = None
-        self.downstream_links_csv_path: Optional[Path] = None
+        # Part 4 is maintained in memory as a DataFrame, then persisted in the
+        # private application artifact cache. CSV is optional export only.
+        self.downstream_links_cache_file: Optional[Path] = None
 
         # The downstream search has its own worker thread because it can
         # process thousands of matched dams and must not block Tkinter.
@@ -909,8 +1235,9 @@ class CascadeResearchApp(tk.Tk):
         self.cascade_graphs: dict[str, nx.DiGraph] = {}
         self.cascade_systems_edges: Optional[pd.DataFrame] = None
         self.cascade_systems_summary: Optional[pd.DataFrame] = None
-        self.cascade_systems_csv_path: Optional[Path] = None
-        self.cascade_systems_summary_csv_path: Optional[Path] = None
+        # Part 5 stores its edge list, summary, and NetworkX graphs in one
+        # application-managed pickle artifact.
+        self.cascade_systems_cache_file: Optional[Path] = None
 
         # Cascade construction can involve many chains, graph merges, and CSV
         # exports. Run it separately from the Tkinter event thread.
@@ -1617,6 +1944,17 @@ class CascadeResearchApp(tk.Tk):
             value="Click to start downstream search."
         )
 
+        self.export_downstream_links_button = ttk.Button(
+            action_frame,
+            text="Export Downstream Links CSV",
+            command=self.export_downstream_links_csv,
+            state=tk.DISABLED,
+        )
+        self.export_downstream_links_button.pack(
+            side=tk.LEFT,
+            padx=(10, 0),
+        )
+
         ttk.Label(
             action_frame,
             textvariable=self.downstream_search_status_text,
@@ -1625,20 +1963,20 @@ class CascadeResearchApp(tk.Tk):
 
         output_frame = ttk.LabelFrame(
             self.downstream_tab,
-            text="Reference Dataset",
+            text="Application-Managed Reference Data",
             padding=12,
         )
         output_frame.pack(fill=tk.X, pady=(0, 10))
 
         self.downstream_csv_path_text = tk.StringVar(
             value=(
-                "The CSV path will be shown after the downstream search completes."
+                "The application cache path will be shown after the downstream search completes."
             )
         )
 
         ttk.Label(
             output_frame,
-            text="Output CSV:",
+            text="Runtime/cache artifact:",
         ).grid(
             row=0,
             column=0,
@@ -1785,6 +2123,28 @@ class CascadeResearchApp(tk.Tk):
         )
         self.construct_cascades_button.pack(side=tk.LEFT)
 
+        self.export_cascade_edges_button = ttk.Button(
+            action_frame,
+            text="Export System Edge List CSV",
+            command=self.export_cascade_edges_csv,
+            state=tk.DISABLED,
+        )
+        self.export_cascade_edges_button.pack(
+            side=tk.LEFT,
+            padx=(10, 0),
+        )
+
+        self.export_cascade_summary_button = ttk.Button(
+            action_frame,
+            text="Export System Summary CSV",
+            command=self.export_cascade_summary_csv,
+            state=tk.DISABLED,
+        )
+        self.export_cascade_summary_button.pack(
+            side=tk.LEFT,
+            padx=(10, 0),
+        )
+
         self.restore_cascade_defaults_button = ttk.Button(
             action_frame,
             text="Restore Defaults",
@@ -1813,7 +2173,7 @@ class CascadeResearchApp(tk.Tk):
 
         output_frame = ttk.LabelFrame(
             self.cascade_builder_tab,
-            text="Cascade Reference Datasets",
+            text="Application-Managed Cascade Data",
             padding=12,
         )
         output_frame.pack(fill=tk.X, pady=(0, 10))
@@ -1828,7 +2188,7 @@ class CascadeResearchApp(tk.Tk):
 
         ttk.Label(
             output_frame,
-            text="System edge-list CSV:",
+            text="Cascade artifact:",
         ).grid(
             row=0,
             column=0,
@@ -1850,7 +2210,7 @@ class CascadeResearchApp(tk.Tk):
 
         ttk.Label(
             output_frame,
-            text="System summary CSV:",
+            text="Optional exports:",
         ).grid(
             row=1,
             column=0,
@@ -2878,7 +3238,7 @@ class CascadeResearchApp(tk.Tk):
             )
             return
 
-        output_file = self.cache_dir / DOWNSTREAM_LINKS_CSV_NAME
+        output_file = self.downstream_links_cache_path
 
         self.run_downstream_search_button.configure(state=tk.DISABLED)
         self.downstream_search_status_text.set(
@@ -2895,7 +3255,9 @@ class CascadeResearchApp(tk.Tk):
         self._append_log(
             f"Maximum downstream search distance: {maximum_distance:g} miles"
         )
-        self._append_log(f"Reference CSV destination: {output_file}")
+        self._append_log(
+            f"Application-managed downstream-link cache: {output_file}"
+        )
 
         self.downstream_search_thread = threading.Thread(
             target=self._run_downstream_search_worker,
@@ -3086,11 +3448,25 @@ class CascadeResearchApp(tk.Tk):
                 kind="stable",
             ).reset_index(drop=True)
 
-            write_downstream_links_csv(results_dataframe, output_file)
-
             linked_dam_count = int(
-                results_dataframe["Downstream Dam"].notna().sum()
+                            results_dataframe["Downstream Dam"].notna().sum()
+                        )
+
+            # Persist the complete Part 4 reference DataFrame as the
+            # application-managed source of truth. Part 5 will consume the
+            # in-memory DataFrame during this run and can restore this artifact
+            # in a future application session.
+            save_application_artifact(
+                artifact_file=output_file,
+                artifact_type="downstream_links",
+                payload={
+                    "downstream_links": results_dataframe,
+                    "maximum_distance_miles": maximum_distance,
+                    "total_matched_dams": total,
+                    "linked_dam_count": linked_dam_count,
+                },
             )
+
             elapsed_total_seconds = time.time() - start_time
 
             self.ui_message_queue.put(
@@ -3098,7 +3474,7 @@ class CascadeResearchApp(tk.Tk):
                     "downstream_success",
                     {
                         "dataframe": results_dataframe,
-                        "output_file": output_file,
+                        "cache_file": output_file,
                         "total_dams": total,
                         "linked_dams": linked_dam_count,
                         "duplicate_node_count": duplicate_node_count,
@@ -3111,6 +3487,62 @@ class CascadeResearchApp(tk.Tk):
         except Exception as error:
             self.ui_message_queue.put(
                 ("downstream_failure", str(error))
+            )
+
+    def export_downstream_links_csv(self) -> None:
+        """
+        Export the current Part 4 DataFrame to a user-selected CSV file.
+
+        This action never changes self.downstream_links and does not replace
+        the application-managed pickle artifact. The export is read-only from
+        the application's point of view.
+        """
+
+        if self.downstream_links is None:
+            messagebox.showwarning(
+                APP_NAME,
+                "No downstream-link data are available to export.",
+            )
+            return
+
+        selected_path = filedialog.asksaveasfilename(
+            title="Export Downstream Dam Links",
+            defaultextension=".csv",
+            initialfile=DEFAULT_DOWNSTREAM_LINKS_EXPORT_NAME,
+            filetypes=[
+                ("CSV files", "*.csv"),
+                ("All files", "*.*"),
+            ],
+        )
+
+        if not selected_path:
+            return
+
+        output_file = Path(selected_path)
+
+        try:
+            export_dataframe_to_csv(
+                self.downstream_links,
+                output_file,
+            )
+
+            self._append_log(
+                f"Exported downstream-link CSV: {output_file}"
+            )
+
+            messagebox.showinfo(
+                APP_NAME,
+                f"Downstream-link CSV exported successfully:\n{output_file}",
+            )
+
+        except Exception as error:
+            self._append_log(
+                f"Downstream-link CSV export failed: {error}"
+            )
+
+            messagebox.showerror(
+                APP_NAME,
+                f"Could not export downstream-link CSV.\n\nDetails: {error}",
             )
 
     def restore_default_cascade_settings(self) -> None:
@@ -3237,8 +3669,7 @@ class CascadeResearchApp(tk.Tk):
 
         require_same_owner = self.require_same_owner_var.get()
 
-        edge_csv_path = self.cache_dir / CASCADE_SYSTEMS_CSV_NAME
-        summary_csv_path = self.cache_dir / CASCADE_SYSTEMS_SUMMARY_CSV_NAME
+        cascade_cache_file = self.cascade_systems_cache_path
 
         self.construct_cascades_button.configure(state=tk.DISABLED)
         self.cascade_construction_status_text.set(
@@ -3269,8 +3700,7 @@ class CascadeResearchApp(tk.Tk):
             args=(
                 minimum_hydroelectric_dams,
                 require_same_owner,
-                edge_csv_path,
-                summary_csv_path,
+                cascade_cache_file,
             ),
             daemon=True,
         )
@@ -3281,8 +3711,7 @@ class CascadeResearchApp(tk.Tk):
         self,
         minimum_hydroelectric_dams: int,
         require_same_owner: bool,
-        edge_csv_path: Path,
-        summary_csv_path: Path,
+        cascade_cache_file: Path,
     ) -> None:
         """
         Construct branching cascade systems from Part 4 downstream links.
@@ -3739,16 +4168,22 @@ class CascadeResearchApp(tk.Tk):
                     kind="stable",
                 ).reset_index(drop=True)
 
-            # The existing atomic CSV writer is generic despite its original
-            # Part 4 name. It also protects spreadsheet users from formula
-            # injection in externally sourced dam-name/owner text.
-            write_downstream_links_csv(
-                edge_dataframe,
-                edge_csv_path,
-            )
-            write_downstream_links_csv(
-                summary_dataframe,
-                summary_csv_path,
+            # Persist all Part 5 products together. This ensures the edge
+            # table, summary table, and NetworkX graphs cannot accidentally
+            # drift out of alignment as separate user-editable files.
+            save_application_artifact(
+                artifact_file=cascade_cache_file,
+                artifact_type="cascade_systems",
+                payload={
+                    "cascade_graphs": cascade_graphs,
+                    "edge_dataframe": edge_dataframe,
+                    "summary_dataframe": summary_dataframe,
+                    "minimum_hydroelectric_dams": minimum_hydroelectric_dams,
+                    "require_same_owner": require_same_owner,
+                    "source_downstream_cache": str(
+                        self.downstream_links_cache_path
+                    ),
+                },
             )
 
             multi_root_system_count = sum(
@@ -3768,8 +4203,7 @@ class CascadeResearchApp(tk.Tk):
                         "cascade_graphs": cascade_graphs,
                         "edge_dataframe": edge_dataframe,
                         "summary_dataframe": summary_dataframe,
-                        "edge_csv_path": edge_csv_path,
-                        "summary_csv_path": summary_csv_path,
+                        "cache_file": cascade_cache_file,
                         "root_candidate_count": len(root_candidate_ids),
                         "covered_candidate_count": len(covered_candidate_ids),
                         "true_root_count": len(true_root_ids),
@@ -3791,6 +4225,106 @@ class CascadeResearchApp(tk.Tk):
             self.ui_message_queue.put(
                 ("cascade_construction_failure", str(error))
             )
+    def export_cascade_edges_csv(self) -> None:
+        """
+        Export the current cascade-system edge list as a user-readable CSV.
+
+        This export does not alter the in-memory graph objects or the
+        application-managed cascade artifact.
+        """
+
+        if self.cascade_systems_edges is None:
+            messagebox.showwarning(
+                APP_NAME,
+                "No cascade-system edge data are available to export.",
+            )
+            return
+
+        selected_path = filedialog.asksaveasfilename(
+            title="Export Cascade System Edge List",
+            defaultextension=".csv",
+            initialfile=DEFAULT_CASCADE_SYSTEMS_EXPORT_NAME,
+            filetypes=[
+                ("CSV files", "*.csv"),
+                ("All files", "*.*"),
+            ],
+        )
+
+        if not selected_path:
+            return
+
+        output_file = Path(selected_path)
+
+        try:
+            export_dataframe_to_csv(
+                self.cascade_systems_edges,
+                output_file,
+            )
+
+            self._append_log(
+                f"Exported cascade-system edge-list CSV: {output_file}"
+            )
+
+        except Exception as error:
+            self._append_log(
+                f"Cascade-system edge-list CSV export failed: {error}"
+            )
+
+            messagebox.showerror(
+                APP_NAME,
+                f"Could not export cascade-system edge list.\n\nDetails: {error}",
+            )
+
+    def export_cascade_summary_csv(self) -> None:
+        """
+        Export the current per-system cascade summary as a user-readable CSV.
+
+        This export is intentionally one-way and is never read back into the
+        application workflow.
+        """
+
+        if self.cascade_systems_summary is None:
+            messagebox.showwarning(
+                APP_NAME,
+                "No cascade-system summary data are available to export.",
+            )
+            return
+
+        selected_path = filedialog.asksaveasfilename(
+            title="Export Cascade System Summary",
+            defaultextension=".csv",
+            initialfile=DEFAULT_CASCADE_SUMMARY_EXPORT_NAME,
+            filetypes=[
+                ("CSV files", "*.csv"),
+                ("All files", "*.*"),
+            ],
+        )
+
+        if not selected_path:
+            return
+
+        output_file = Path(selected_path)
+
+        try:
+            export_dataframe_to_csv(
+                self.cascade_systems_summary,
+                output_file,
+            )
+
+            self._append_log(
+                f"Exported cascade-system summary CSV: {output_file}"
+            )
+
+        except Exception as error:
+            self._append_log(
+                f"Cascade-system summary CSV export failed: {error}"
+            )
+
+            messagebox.showerror(
+                APP_NAME,
+                f"Could not export cascade-system summary.\n\nDetails: {error}",
+            )
+
     def refresh_cascade_system_list(self) -> None:
         """
         Restore the complete set of constructed systems in Part 6.
@@ -5161,7 +5695,6 @@ class CascadeResearchApp(tk.Tk):
                 ):
                     skipped_edge_count += 1
                     continue
-
                 raw_distance = edge_attributes.get("distance_miles")
 
                 try:
@@ -5445,7 +5978,7 @@ class CascadeResearchApp(tk.Tk):
 
                 elif message_type == "downstream_success":
                     self.downstream_links = payload["dataframe"]
-                    self.downstream_links_csv_path = payload["output_file"]
+                    self.downstream_links_cache_file = payload["cache_file"]
 
                     # Downstream links are now available. Part 5 additionally
                     # checks that Part 3 filtering has been run before it
@@ -5453,6 +5986,10 @@ class CascadeResearchApp(tk.Tk):
                     self.notebook.tab(
                         self.cascade_builder_tab,
                         state="normal",
+                    )
+
+                    self.export_downstream_links_button.configure(
+                        state=tk.NORMAL
                     )
 
                     total_dams = payload["total_dams"]
@@ -5468,7 +6005,7 @@ class CascadeResearchApp(tk.Tk):
                     )
 
                     self.downstream_csv_path_text.set(
-                        str(self.downstream_links_csv_path)
+                        f"Application cache: {self.downstream_links_cache_file}"
                     )
 
                     self.downstream_search_status_text.set(
@@ -5511,7 +6048,7 @@ class CascadeResearchApp(tk.Tk):
                             ),
                             (
                                 "Reference CSV",
-                                str(self.downstream_links_csv_path),
+                                str(self.downstream_links_cache_file),
                             ),
                         ]
                     )
@@ -5529,7 +6066,8 @@ class CascadeResearchApp(tk.Tk):
                         f"{total_dams:,} dams ({match_rate:.1f}%)."
                     )
                     self._append_log(
-                        f"Saved reference CSV: {self.downstream_links_csv_path}"
+                        "Saved application-managed downstream-link artifact: "
+                        f"{self.downstream_links_cache_file}"
                     )
                     self._append_log(
                         "The downstream-link reference data are now ready for "
@@ -5558,10 +6096,7 @@ class CascadeResearchApp(tk.Tk):
                     self.cascade_graphs = payload["cascade_graphs"]
                     self.cascade_systems_edges = payload["edge_dataframe"]
                     self.cascade_systems_summary = payload["summary_dataframe"]
-                    self.cascade_systems_csv_path = payload["edge_csv_path"]
-                    self.cascade_systems_summary_csv_path = payload[
-                        "summary_csv_path"
-                    ]
+                    self.cascade_systems_cache_file = payload["cache_file"]
 
                     # Part 6 uses the in-memory graphs produced by Part 5.
                     # It remains available even when the current criteria
@@ -5572,12 +6107,19 @@ class CascadeResearchApp(tk.Tk):
                     )
 
                     self.refresh_cascade_system_list()
+
+                    self.export_cascade_edges_button.configure(
+                        state=tk.NORMAL
+                    )
+                    self.export_cascade_summary_button.configure(
+                        state=tk.NORMAL
+                    )
                     
                     self.cascade_systems_csv_path_text.set(
-                        str(self.cascade_systems_csv_path)
+                        f"Application cache: {self.cascade_systems_cache_file}"
                     )
                     self.cascade_summary_csv_path_text.set(
-                        str(self.cascade_systems_summary_csv_path)
+                        "CSV outputs are optional exports and are not read by the application."
                     )
 
                     self.construct_cascades_button.configure(state=tk.NORMAL)
@@ -5671,11 +6213,8 @@ class CascadeResearchApp(tk.Tk):
                         f"Direct downstream edges exported: {edge_count:,}"
                     )
                     self._append_log(
-                        f"System edge-list CSV: {self.cascade_systems_csv_path}"
-                    )
-                    self._append_log(
-                        f"System summary CSV: "
-                        f"{self.cascade_systems_summary_csv_path}"
+                        "Saved application-managed cascade artifact: "
+                        f"{self.cascade_systems_cache_file}"
                     )
 
                     if payload["cycle_count"]:
