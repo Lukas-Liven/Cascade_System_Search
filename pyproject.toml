@@ -1,0 +1,39 @@
+# pyproject.toml
+#
+# This project is a desktop Tkinter research application rather than a
+# distributable Python package. `package = false` tells uv not to attempt
+# package-build/install behavior for the repository itself.
+
+[project]
+name = "cascade-research-tool"
+version = "0.1.0"
+description = "Tkinter research application for identifying and visualizing dam cascading systems."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # Tabular data loading, filtering, joining, and CSV export.
+    "pandas>=2.2.0",
+
+    # HTTPS retrieval of the ResNet crosswalk and Zenodo metadata.
+    "requests>=2.31.0",
+
+    # GeoDataFrame support for cached GeoConnex dam records.
+    "geopandas>=0.14.0",
+
+    # Enhanced NHD network acquisition and GeoConnex access.
+    "pynhd>=0.19.0",
+
+    # National Inventory of Dams access and caching.
+    "pygeohydro>=0.19.0",
+
+    # Directed cascade-system graph construction and analysis.
+    "networkx>=3.2.0",
+
+    # Interactive Folium/Leaflet HTML map creation.
+    "folium>=0.16.0",
+]
+
+[tool.uv]
+# The repository is an application project. The entry point is executed with:
+#     uv run python cascade_research_app.py
+package = false
