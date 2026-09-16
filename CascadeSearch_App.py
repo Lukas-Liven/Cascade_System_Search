@@ -41,17 +41,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-
 import pandas as pd
 import requests
 import tkinter as tk
 from tkinter import messagebox, ttk
+import html
+import webbrowser
 
 import geopandas as gpd
 import pynhd
 from pynhd import GeoConnex
 import pygeohydro as gh
-
+import networkx as nx
+import folium
 
 # ---------------------------------------------------------------------------
 # Application and data-source constants
@@ -84,7 +86,6 @@ NHD_GRAPH_CACHE_NAME = "nhd_enhd_network.pkl"
 CACHE_METADATA_NAME = "cache_metadata.json"
 RESNET_CACHE_NAME = RESNET_FILENAME
 
-
 # ---------------------------------------------------------------------------
 # Data structures and exceptions
 # ---------------------------------------------------------------------------
@@ -95,7 +96,6 @@ class CacheSecurityError(RuntimeError):
 
 class DataValidationError(RuntimeError):
     """Raised when an upstream data source lacks fields required by the app."""
-
 
 @dataclass
 class MappingStatistics:
@@ -132,7 +132,6 @@ class InitializationResult:
     damid_to_node: dict[str, Any]
     statistics: MappingStatistics
 
-
 # ---------------------------------------------------------------------------
 # Cache and safe-download utilities
 # ---------------------------------------------------------------------------
@@ -161,7 +160,6 @@ def get_application_cache_directory() -> Path:
 
     return cache_dir
 
-
 def ensure_pickle_cache_is_private(cache_file: Path) -> None:
     """
     Reject pickle caches writable by other users on POSIX systems.
@@ -179,7 +177,6 @@ def ensure_pickle_cache_is_private(cache_file: Path) -> None:
             f"Refusing to load insecure pickle cache: {cache_file}. "
             "Delete it and rerun initialization."
         )
-
 
 def atomic_write_bytes(destination: Path, data: bytes) -> None:
     """Write bytes atomically, preventing partial cache files after a failure."""
@@ -200,7 +197,6 @@ def atomic_write_bytes(destination: Path, data: bytes) -> None:
         if temporary.exists():
             temporary.unlink(missing_ok=True)
 
-
 def write_cache_metadata(cache_dir: Path) -> None:
     """Record the cache schema version without storing sensitive information."""
 
@@ -213,7 +209,6 @@ def write_cache_metadata(cache_dir: Path) -> None:
         cache_dir / CACHE_METADATA_NAME,
         json.dumps(metadata, indent=2).encode("utf-8"),
     )
-
 
 def normalize_identifier(value: Any) -> Optional[str]:
     """
@@ -229,7 +224,6 @@ def normalize_identifier(value: Any) -> Optional[str]:
 
     text = str(value).strip()
     return text if text else None
-
 
 def parse_comid(value: Any) -> Optional[int]:
     """
@@ -255,7 +249,6 @@ def parse_comid(value: Any) -> Optional[int]:
     except ValueError:
         return None
 
-
 def get_zenodo_file_metadata(record: dict[str, Any], filename: str) -> dict[str, Any]:
     """Find a named file in a Zenodo record response."""
 
@@ -266,7 +259,6 @@ def get_zenodo_file_metadata(record: dict[str, Any], filename: str) -> dict[str,
     raise DataValidationError(
         f"Zenodo record {RESNET_RECORD_ID} does not contain expected file '{filename}'."
     )
-
 
 def download_resnet_with_validation(
     destination: Path,
@@ -395,7 +387,6 @@ def get_edge_length_km(
 
     return length if math.isfinite(length) and length >= 0 else 0.0
 
-
 def find_downstream_dam(
     graph: Any,
     start_node: Any,
@@ -480,7 +471,6 @@ def find_downstream_dam(
 
     return None, None
 
-
 def sanitize_csv_cell(value: Any) -> Any:
     """
     Prevent spreadsheet formula injection in exported CSV values.
@@ -501,7 +491,6 @@ def sanitize_csv_cell(value: Any) -> Any:
             return "'" + value
 
     return value
-
 
 def write_downstream_links_csv(
     dataframe: pd.DataFrame,
@@ -541,6 +530,78 @@ def write_downstream_links_csv(
     finally:
         temporary_file.unlink(missing_ok=True)
 
+# ---------------------------------------------------------------------------
+# Part 5: Cascade-system construction constants
+# ---------------------------------------------------------------------------
+
+CASCADE_SYSTEMS_CSV_NAME = "cascading_systems.csv"
+CASCADE_SYSTEMS_SUMMARY_CSV_NAME = "cascading_systems_summary.csv"
+
+DEFAULT_MIN_HYDROELECTRIC_DAMS_PER_CASCADE = 2
+DEFAULT_REQUIRE_SAME_OWNER = False
+
+# ---------------------------------------------------------------------------
+# Part 6: Cascade inspection and map-output constants
+# ---------------------------------------------------------------------------
+
+CASCADE_MAPS_DIRECTORY_NAME = "cascade_maps"
+
+def bearing_degrees(
+    latitude_1: float,
+    longitude_1: float,
+    latitude_2: float,
+    longitude_2: float,
+) -> float:
+    """
+    Calculate the compass bearing from the upstream point to the downstream point.
+
+    Returns a bearing in degrees where:
+    - 0 degrees points north;
+    - 90 degrees points east;
+    - 180 degrees points south;
+    - 270 degrees points west.
+
+    The Part 6 map rotates an upward-pointing triangle by this value, making
+    the arrow point from the upstream dam toward its direct downstream dam.
+    """
+
+    latitude_1_radians = math.radians(latitude_1)
+    latitude_2_radians = math.radians(latitude_2)
+    longitude_delta_radians = math.radians(longitude_2 - longitude_1)
+
+    x_value = math.sin(longitude_delta_radians) * math.cos(
+        latitude_2_radians
+    )
+    y_value = (
+        math.cos(latitude_1_radians) * math.sin(latitude_2_radians)
+        - math.sin(latitude_1_radians)
+        * math.cos(latitude_2_radians)
+        * math.cos(longitude_delta_radians)
+    )
+
+    return (
+        math.degrees(math.atan2(x_value, y_value)) + 360
+    ) % 360
+
+# Part 6 overview-map output name. The file is overwritten safely whenever a
+# researcher generates a new map for a different Part 6 query result.
+CONUS_CASCADE_MAP_FILENAME = "conus_cascade_query_map.html"
+
+# Each cascading system receives a separate line color. The flow direction is
+# indicated independently by the midpoint arrow, so color distinguishes systems
+# rather than direction.
+CASCADE_LINE_COLORS = [
+    "blue",
+    "darkred",
+    "darkgreen",
+    "purple",
+    "orange",
+    "darkblue",
+    "cadetblue",
+    "deeppink",
+    "black",
+    "darkorange",
+]
 
 # ---------------------------------------------------------------------------
 # Initialization service: datasets, cache, and COMID/node matching
@@ -843,6 +904,31 @@ class CascadeResearchApp(tk.Tk):
         # process thousands of matched dams and must not block Tkinter.
         self.downstream_search_thread: Optional[threading.Thread] = None
 
+        # Part 5 output. Each key is a stable cascade system ID and each value
+        # is a NetworkX DiGraph representing one potentially branching system.
+        self.cascade_graphs: dict[str, nx.DiGraph] = {}
+        self.cascade_systems_edges: Optional[pd.DataFrame] = None
+        self.cascade_systems_summary: Optional[pd.DataFrame] = None
+        self.cascade_systems_csv_path: Optional[Path] = None
+        self.cascade_systems_summary_csv_path: Optional[Path] = None
+
+        # Cascade construction can involve many chains, graph merges, and CSV
+        # exports. Run it separately from the Tkinter event thread.
+        self.cascade_construction_thread: Optional[threading.Thread] = None
+
+        # Part 6 stores generated HTML maps in the private user-local
+        # application cache directory. Each selected system receives its own
+        # independently referenceable interactive HTML map file.
+        self.cascade_maps_directory = (
+            self.cache_dir / CASCADE_MAPS_DIRECTORY_NAME
+        )
+
+        # The latest Part 6 query result is retained so the researcher can
+        # generate a national overview map from exactly the systems displayed
+        # in the query-results table. An empty list means that no successful
+        # query has run yet.
+        self.last_cascade_query_system_ids: list[str] = []
+
         # Background worker threads communicate strictly through this queue.
         # Tkinter widgets are updated only on the main/UI thread.
         self.ui_message_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -947,22 +1033,21 @@ class CascadeResearchApp(tk.Tk):
         # inventory produced during Part 1 initialization.
         self.notebook.tab(self.downstream_tab, state="disabled")
 
-        self._build_placeholder_tab(
-            self.cascade_builder_tab,
-            "Part 5 — Construct Cascades",
-            "Cascade construction and map-export controls will be implemented later.",
-        )
-        self._build_placeholder_tab(
-            self.cascade_query_tab,
-            "Part 6 — Query Cascades",
-            "Cascade inspection, reports, and visualization tools will be implemented later.",
-        )
+        # Part 5 remains unavailable until the user has both selected a Part 3
+        # candidate set and built the Part 4 downstream-link reference CSV.
+        self.notebook.tab(self.cascade_builder_tab, state="disabled")
 
-        # Build the currently implemented tabs.
+        # Part 6 is enabled when Part 5 has successfully constructed one or
+        # more in-memory NetworkX cascade graphs.
+        self.notebook.tab(self.cascade_query_tab, state="disabled")
+
+        # Build the implemented tabs.
         self._build_initialization_tab()
         self._build_node_explorer_tab()
         self._build_filter_tab()
         self._build_downstream_search_tab()
+        self._build_cascade_builder_tab()
+        self._build_cascade_query_tab()
 
         # The log receives its own lower resizable pane. It remains visible
         # regardless of the active workflow tab.
@@ -1590,31 +1675,639 @@ class CascadeResearchApp(tk.Tk):
         self.downstream_results_tree.column("value", width=260, anchor=tk.E)
         self.downstream_results_tree.pack(fill=tk.BOTH, expand=True)
 
-
-    def _build_placeholder_tab(
-        self,
-        tab: ttk.Frame,
-        title: str,
-        description: str,
-    ) -> None:
+    def _build_cascade_builder_tab(self) -> None:
         """
-        Add a consistent placeholder to an application stage not yet built.
+        Build Part 5: downstream-link-based cascade-system construction.
 
-        Keeping placeholders avoids creating a misleading blank tab and makes
-        the staged development plan visible to the user.
+        Part 5 consumes:
+        - the researcher-selected/matched candidate dams from Part 3; and
+        - the direct downstream dam links created in Part 4.
+
+        It does not rerun NHD river-network traversal. That separation keeps
+        downstream relationship generation reusable and cascade criteria
+        reproducible.
         """
 
         ttk.Label(
-            tab,
-            text=title,
+            self.cascade_builder_tab,
+            text="Part 5: Construct Cascading Systems",
             font=("TkDefaultFont", 13, "bold"),
         ).pack(anchor=tk.W)
 
         ttk.Label(
-            tab,
-            text=description,
+            self.cascade_builder_tab,
+            text=(
+                "Build directed cascading systems from the Part 4 downstream "
+                "dam-pair reference dataset. Part 3 selected and matched dams "
+                "are used as cascade root candidates. Each system must contain "
+                "at least two dams, regardless of the hydroelectric criterion."
+            ),
             wraplength=950,
-        ).pack(anchor=tk.W, pady=(8, 0))
+        ).pack(anchor=tk.W, pady=(4, 14))
+
+        settings_frame = ttk.LabelFrame(
+            self.cascade_builder_tab,
+            text="Cascade Construction Criteria",
+            padding=12,
+        )
+        settings_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(
+            settings_frame,
+            text="Minimum hydroelectric dams per cascading system:",
+        ).grid(
+            row=0,
+            column=0,
+            sticky=tk.W,
+            padx=(0, 10),
+            pady=(0, 12),
+        )
+
+        self.minimum_hydroelectric_dams_text = tk.StringVar(
+            value=str(DEFAULT_MIN_HYDROELECTRIC_DAMS_PER_CASCADE)
+        )
+
+        self.minimum_hydroelectric_dams_entry = ttk.Entry(
+            settings_frame,
+            textvariable=self.minimum_hydroelectric_dams_text,
+            width=12,
+        )
+        self.minimum_hydroelectric_dams_entry.grid(
+            row=0,
+            column=1,
+            sticky=tk.W,
+            pady=(0, 12),
+        )
+
+        ttk.Label(
+            settings_frame,
+            text=(
+                "Enter a whole number greater than or equal to 0. "
+                "The system must still contain at least two dams."
+            ),
+            wraplength=520,
+        ).grid(
+            row=0,
+            column=2,
+            sticky=tk.W,
+            padx=(10, 0),
+            pady=(0, 12),
+        )
+
+        self.require_same_owner_var = tk.BooleanVar(
+            value=DEFAULT_REQUIRE_SAME_OWNER
+        )
+
+        self.require_same_owner_checkbox = ttk.Checkbutton(
+            settings_frame,
+            text=(
+                "Require every dam in each cascade chain to have the same owner "
+                "as its root dam"
+            ),
+            variable=self.require_same_owner_var,
+        )
+        self.require_same_owner_checkbox.grid(
+            row=1,
+            column=0,
+            columnspan=3,
+            sticky=tk.W,
+        )
+
+        settings_frame.columnconfigure(2, weight=1)
+
+        action_frame = ttk.Frame(self.cascade_builder_tab)
+        action_frame.pack(fill=tk.X, pady=(0, 10))
+
+        self.construct_cascades_button = ttk.Button(
+            action_frame,
+            text="Construct Cascade Systems",
+            command=self.start_cascade_construction,
+        )
+        self.construct_cascades_button.pack(side=tk.LEFT)
+
+        self.restore_cascade_defaults_button = ttk.Button(
+            action_frame,
+            text="Restore Defaults",
+            command=self.restore_default_cascade_settings,
+        )
+        self.restore_cascade_defaults_button.pack(
+            side=tk.LEFT,
+            padx=(10, 0),
+        )
+
+        self.cascade_construction_status_text = tk.StringVar(
+            value=(
+                "Apply Part 3 filters and build Part 4 downstream links before "
+                "constructing cascade systems."
+            )
+        )
+
+        ttk.Label(
+            action_frame,
+            textvariable=self.cascade_construction_status_text,
+            foreground="#1f4e79",
+        ).pack(
+            side=tk.LEFT,
+            padx=(16, 0),
+        )
+
+        output_frame = ttk.LabelFrame(
+            self.cascade_builder_tab,
+            text="Cascade Reference Datasets",
+            padding=12,
+        )
+        output_frame.pack(fill=tk.X, pady=(0, 10))
+
+        self.cascade_systems_csv_path_text = tk.StringVar(
+            value="The cascade edge-list CSV will be shown after construction."
+        )
+
+        self.cascade_summary_csv_path_text = tk.StringVar(
+            value="The cascade summary CSV will be shown after construction."
+        )
+
+        ttk.Label(
+            output_frame,
+            text="System edge-list CSV:",
+        ).grid(
+            row=0,
+            column=0,
+            sticky=tk.NW,
+            padx=(0, 8),
+            pady=(0, 8),
+        )
+
+        ttk.Label(
+            output_frame,
+            textvariable=self.cascade_systems_csv_path_text,
+            wraplength=760,
+        ).grid(
+            row=0,
+            column=1,
+            sticky=tk.W,
+            pady=(0, 8),
+        )
+
+        ttk.Label(
+            output_frame,
+            text="System summary CSV:",
+        ).grid(
+            row=1,
+            column=0,
+            sticky=tk.NW,
+            padx=(0, 8),
+        )
+
+        ttk.Label(
+            output_frame,
+            textvariable=self.cascade_summary_csv_path_text,
+            wraplength=760,
+        ).grid(
+            row=1,
+            column=1,
+            sticky=tk.W,
+        )
+
+        summary_frame = ttk.LabelFrame(
+            self.cascade_builder_tab,
+            text="Latest Construction Summary",
+            padding=10,
+        )
+        summary_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.cascade_results_tree = ttk.Treeview(
+            summary_frame,
+            columns=("metric", "value"),
+            show="headings",
+            height=9,
+        )
+        self.cascade_results_tree.heading("metric", text="Metric")
+        self.cascade_results_tree.heading("value", text="Value")
+        self.cascade_results_tree.column("metric", width=630, anchor=tk.W)
+        self.cascade_results_tree.column("value", width=240, anchor=tk.E)
+        self.cascade_results_tree.pack(fill=tk.BOTH, expand=True)
+
+    def _build_cascade_query_tab(self) -> None:
+        """
+        Build Part 6: cascade-system querying, reporting, and visualization.
+
+        Query criteria are evaluated at the SYSTEM level. A system matches an
+        enabled criterion when at least one dam node inside that system matches
+        that criterion. When multiple criteria are enabled, all enabled
+        criteria must be satisfied.
+        """
+
+        ttk.Label(
+            self.cascade_query_tab,
+            text="Part 6: Query and Visualize Cascade Systems",
+            font=("TkDefaultFont", 13, "bold"),
+        ).pack(anchor=tk.W)
+
+        ttk.Label(
+            self.cascade_query_tab,
+            text=(
+                "Filter constructed cascading systems by state, dam NID ID, "
+                "and river/stream name. Enable one or more criteria; enabled "
+                "criteria are combined using AND logic. Query results are "
+                "written to the Application Log and can be inspected or mapped."
+            ),
+            wraplength=950,
+        ).pack(anchor=tk.W, pady=(4, 12))
+
+        # ------------------------------------------------------------------
+        # Query filters
+        # ------------------------------------------------------------------
+        query_frame = ttk.LabelFrame(
+            self.cascade_query_tab,
+            text="Cascade-System Filters",
+            padding=12,
+        )
+        query_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # State query controls.
+        self.query_state_enabled_var = tk.BooleanVar(value=False)
+        self.query_state_text = tk.StringVar()
+
+        self.query_state_checkbox = ttk.Checkbutton(
+            query_frame,
+            text="At least one dam in state:",
+            variable=self.query_state_enabled_var,
+            command=self._update_cascade_query_control_states,
+        )
+        self.query_state_checkbox.grid(
+            row=0,
+            column=0,
+            sticky=tk.W,
+            padx=(0, 10),
+            pady=(0, 8),
+        )
+
+        self.query_state_entry = ttk.Entry(
+            query_frame,
+            textvariable=self.query_state_text,
+            width=12,
+        )
+        self.query_state_entry.grid(
+            row=0,
+            column=1,
+            sticky=tk.W,
+            pady=(0, 8),
+        )
+
+        ttk.Label(
+            query_frame,
+            text="Two-letter postal abbreviation, for example: GA",
+        ).grid(
+            row=0,
+            column=2,
+            sticky=tk.W,
+            padx=(10, 0),
+            pady=(0, 8),
+        )
+
+        # NID ID query controls.
+        self.query_nid_enabled_var = tk.BooleanVar(value=False)
+        self.query_nid_text = tk.StringVar()
+
+        self.query_nid_checkbox = ttk.Checkbutton(
+            query_frame,
+            text="System contains dam with NID ID:",
+            variable=self.query_nid_enabled_var,
+            command=self._update_cascade_query_control_states,
+        )
+        self.query_nid_checkbox.grid(
+            row=1,
+            column=0,
+            sticky=tk.W,
+            padx=(0, 10),
+            pady=(0, 8),
+        )
+
+        self.query_nid_entry = ttk.Entry(
+            query_frame,
+            textvariable=self.query_nid_text,
+            width=20,
+        )
+        self.query_nid_entry.grid(
+            row=1,
+            column=1,
+            sticky=tk.W,
+            pady=(0, 8),
+        )
+
+        ttk.Label(
+            query_frame,
+            text="Exact NID ID match; case-insensitive.",
+        ).grid(
+            row=1,
+            column=2,
+            sticky=tk.W,
+            padx=(10, 0),
+            pady=(0, 8),
+        )
+
+        # River/stream query controls.
+        self.query_river_enabled_var = tk.BooleanVar(value=False)
+        self.query_river_text = tk.StringVar()
+
+        self.query_river_checkbox = ttk.Checkbutton(
+            query_frame,
+            text="At least one dam on river/stream:",
+            variable=self.query_river_enabled_var,
+            command=self._update_cascade_query_control_states,
+        )
+        self.query_river_checkbox.grid(
+            row=2,
+            column=0,
+            sticky=tk.W,
+            padx=(0, 10),
+        )
+
+        self.query_river_entry = ttk.Entry(
+            query_frame,
+            textvariable=self.query_river_text,
+            width=30,
+        )
+        self.query_river_entry.grid(
+            row=2,
+            column=1,
+            sticky=tk.W,
+        )
+
+        ttk.Label(
+            query_frame,
+            text=(
+                "Case-insensitive partial match against the NID river/stream "
+                "name field."
+            ),
+            wraplength=470,
+        ).grid(
+            row=2,
+            column=2,
+            sticky=tk.W,
+            padx=(10, 0),
+        )
+
+        query_frame.columnconfigure(2, weight=1)
+
+        # Allow keyboard users to start a query by pressing Enter in any
+        # active query field.
+        self.query_state_entry.bind(
+            "<Return>",
+            lambda _event: self.run_cascade_system_query(),
+        )
+        self.query_nid_entry.bind(
+            "<Return>",
+            lambda _event: self.run_cascade_system_query(),
+        )
+        self.query_river_entry.bind(
+            "<Return>",
+            lambda _event: self.run_cascade_system_query(),
+        )
+
+        query_actions_frame = ttk.Frame(self.cascade_query_tab)
+        query_actions_frame.pack(fill=tk.X, pady=(0, 10))
+
+        self.run_cascade_query_button = ttk.Button(
+            query_actions_frame,
+            text="Search Cascading Systems",
+            command=self.run_cascade_system_query,
+        )
+        self.run_cascade_query_button.pack(side=tk.LEFT)
+
+        self.clear_cascade_query_button = ttk.Button(
+            query_actions_frame,
+            text="Clear Filters / Show All Systems",
+            command=self.clear_cascade_system_query,
+        )
+        self.clear_cascade_query_button.pack(side=tk.LEFT, padx=(10, 0))
+
+        # The overview map uses the systems returned by the current Part 6
+        # query. With no active query filters, that result is every system.
+        self.generate_conus_query_map_button = ttk.Button(
+            query_actions_frame,
+            text="Generate Map of Query Results",
+            command=self.generate_query_results_conus_map,
+        )
+        self.generate_conus_query_map_button.pack(
+            side=tk.LEFT,
+            padx=(10, 0),
+        )
+
+        # Distance labels can clutter a large national map, so they are
+        # optional. Tooltips always continue to show each edge distance.
+        self.show_overview_distance_labels_var = tk.BooleanVar(value=False)
+
+        self.show_overview_distance_labels_checkbox = ttk.Checkbutton(
+            query_actions_frame,
+            text="Show distance labels",
+            variable=self.show_overview_distance_labels_var,
+        )
+        self.show_overview_distance_labels_checkbox.pack(
+            side=tk.LEFT,
+            padx=(10, 0),
+        )
+
+        self.cascade_query_status_text = tk.StringVar(
+            value=(
+                "Construct cascade systems in Part 5 before querying or "
+                "visualizing them."
+            )
+        )
+
+        ttk.Label(
+            query_actions_frame,
+            textvariable=self.cascade_query_status_text,
+            foreground="#1f4e79",
+        ).pack(side=tk.LEFT, padx=(16, 0))
+
+        # ------------------------------------------------------------------
+        # Query result systems
+        # ------------------------------------------------------------------
+        results_frame = ttk.LabelFrame(
+            self.cascade_query_tab,
+            text="Matching Cascade Systems",
+            padding=10,
+        )
+        results_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        self.cascade_query_matches_tree = ttk.Treeview(
+            results_frame,
+            columns=(
+                "system_id",
+                "root_dams",
+                "total_dams",
+                "hydroelectric_dams",
+            ),
+            show="headings",
+            height=7,
+        )
+
+        self.cascade_query_matches_tree.heading(
+            "system_id",
+            text="System ID",
+        )
+        self.cascade_query_matches_tree.heading(
+            "root_dams",
+            text="Root Dam ID(s)",
+        )
+        self.cascade_query_matches_tree.heading(
+            "total_dams",
+            text="Total Dams",
+        )
+        self.cascade_query_matches_tree.heading(
+            "hydroelectric_dams",
+            text="Hydroelectric Dams",
+        )
+
+        self.cascade_query_matches_tree.column(
+            "system_id",
+            width=150,
+            anchor=tk.W,
+        )
+        self.cascade_query_matches_tree.column(
+            "root_dams",
+            width=350,
+            anchor=tk.W,
+        )
+        self.cascade_query_matches_tree.column(
+            "total_dams",
+            width=120,
+            anchor=tk.E,
+        )
+        self.cascade_query_matches_tree.column(
+            "hydroelectric_dams",
+            width=160,
+            anchor=tk.E,
+        )
+
+        matches_scrollbar = ttk.Scrollbar(
+            results_frame,
+            orient=tk.VERTICAL,
+            command=self.cascade_query_matches_tree.yview,
+        )
+        self.cascade_query_matches_tree.configure(
+            yscrollcommand=matches_scrollbar.set
+        )
+
+        self.cascade_query_matches_tree.pack(
+            side=tk.LEFT,
+            fill=tk.BOTH,
+            expand=True,
+        )
+        matches_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Selecting a system in the results table makes it the active system
+        # for the reporting and mapping controls below.
+        self.cascade_query_matches_tree.bind(
+            "<<TreeviewSelect>>",
+            self._select_cascade_system_from_query_result,
+        )
+
+        # ------------------------------------------------------------------
+        # Existing selected-system tools
+        # ------------------------------------------------------------------
+        selection_frame = ttk.LabelFrame(
+            self.cascade_query_tab,
+            text="Selected Cascade System",
+            padding=12,
+        )
+        selection_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(
+            selection_frame,
+            text="System ID:",
+        ).grid(
+            row=0,
+            column=0,
+            sticky=tk.W,
+            padx=(0, 10),
+        )
+
+        self.selected_system_id_text = tk.StringVar()
+
+        self.cascade_system_combobox = ttk.Combobox(
+            selection_frame,
+            textvariable=self.selected_system_id_text,
+            width=34,
+            state="normal",
+        )
+        self.cascade_system_combobox.grid(
+            row=0,
+            column=1,
+            sticky=tk.W,
+        )
+
+        self.cascade_system_combobox.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self._update_selected_system_details(),
+        )
+        self.cascade_system_combobox.bind(
+            "<Return>",
+            lambda _event: self._update_selected_system_details(),
+        )
+
+        self.refresh_system_list_button = ttk.Button(
+            selection_frame,
+            text="Show All System IDs",
+            command=self.refresh_cascade_system_list,
+        )
+        self.refresh_system_list_button.grid(
+            row=0,
+            column=2,
+            sticky=tk.W,
+            padx=(10, 0),
+        )
+
+        selection_frame.columnconfigure(3, weight=1)
+
+        action_frame = ttk.Frame(self.cascade_query_tab)
+        action_frame.pack(fill=tk.X, pady=(0, 10))
+
+        self.print_cascade_button = ttk.Button(
+            action_frame,
+            text="Print System Information to Log",
+            command=self.print_selected_cascade_graph,
+        )
+        self.print_cascade_button.pack(side=tk.LEFT)
+
+        self.generate_map_button = ttk.Button(
+            action_frame,
+            text="Generate and Open Interactive Map",
+            command=self.generate_selected_cascade_map,
+        )
+        self.generate_map_button.pack(side=tk.LEFT, padx=(10, 0))
+
+        details_frame = ttk.LabelFrame(
+            self.cascade_query_tab,
+            text="Selected System Overview",
+            padding=10,
+        )
+        details_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.cascade_query_results_tree = ttk.Treeview(
+            details_frame,
+            columns=("metric", "value"),
+            show="headings",
+            height=7,
+        )
+        self.cascade_query_results_tree.heading("metric", text="Metric")
+        self.cascade_query_results_tree.heading("value", text="Value")
+        self.cascade_query_results_tree.column(
+            "metric",
+            width=360,
+            anchor=tk.W,
+        )
+        self.cascade_query_results_tree.column(
+            "value",
+            width=540,
+            anchor=tk.W,
+        )
+        self.cascade_query_results_tree.pack(fill=tk.BOTH, expand=True)
+
+        # Disabled controls cannot accidentally participate in a query until
+        # their associated checkbox is selected.
+        self._update_cascade_query_control_states()
 
     @staticmethod
     def _node_id_matches(stored_node_id: object, requested_node_id: int) -> bool:
@@ -2420,6 +3113,2225 @@ class CascadeResearchApp(tk.Tk):
                 ("downstream_failure", str(error))
             )
 
+    def restore_default_cascade_settings(self) -> None:
+        """
+        Restore the requested default Part 5 settings.
+
+        Default behavior:
+        - at least two hydroelectric dams per system;
+        - ownership continuity is not required.
+        """
+
+        self.minimum_hydroelectric_dams_text.set(
+            str(DEFAULT_MIN_HYDROELECTRIC_DAMS_PER_CASCADE)
+        )
+        self.require_same_owner_var.set(DEFAULT_REQUIRE_SAME_OWNER)
+
+        self._append_log(
+            "Part 5 settings restored: minimum hydroelectric dams = 2; "
+            "same-owner continuation requirement = False."
+        )
+
+
+    @staticmethod
+    def _parse_nonnegative_integer(
+        raw_value: str,
+        field_label: str,
+    ) -> int:
+        """
+        Parse a nonnegative integer without accepting floats such as 2.5.
+
+        The minimum hydroelectric-dam criterion is a count, not a continuous
+        measurement, so only whole numbers are valid.
+        """
+
+        cleaned_value = raw_value.strip()
+
+        if not cleaned_value:
+            raise ValueError(f"{field_label} is required.")
+
+        try:
+            value = int(cleaned_value)
+        except ValueError as error:
+            raise ValueError(
+                f"{field_label} must be a whole number greater than or equal to 0."
+            ) from error
+
+        if value < 0:
+            raise ValueError(
+                f"{field_label} must be greater than or equal to 0."
+            )
+
+        return value
+
+
+    def _display_cascade_results(
+        self,
+        result_rows: list[tuple[str, str]],
+    ) -> None:
+        """Replace the Part 5 construction-summary table contents."""
+
+        for item_id in self.cascade_results_tree.get_children():
+            self.cascade_results_tree.delete(item_id)
+
+        for metric, value in result_rows:
+            self.cascade_results_tree.insert(
+                "",
+                tk.END,
+                values=(metric, value),
+            )
+
+
+    def start_cascade_construction(self) -> None:
+        """
+        Validate prerequisites and begin cascade construction in a worker.
+
+        Cascade construction requires:
+        1. Part 1 initialized graph/inventory state;
+        2. Part 3 selected, matched root candidates;
+        3. Part 4 downstream direct-link reference results.
+
+        The Part 4 table—not a new river-network traversal—is the sole source
+        of dam-to-dam graph edges in this stage.
+        """
+
+        if self.initialization_result is None:
+            messagebox.showwarning(
+                APP_NAME,
+                "Initialize data in Part 1 before constructing cascades.",
+            )
+            return
+
+        if self.filtered_dam_inventory_matched is None:
+            messagebox.showwarning(
+                APP_NAME,
+                "Apply Part 3 filters before constructing cascade systems.",
+            )
+            return
+
+        if self.downstream_links is None:
+            messagebox.showwarning(
+                APP_NAME,
+                "Build the Part 4 downstream dam reference CSV before constructing cascades.",
+            )
+            return
+
+        if (
+            self.cascade_construction_thread is not None
+            and self.cascade_construction_thread.is_alive()
+        ):
+            messagebox.showinfo(
+                APP_NAME,
+                "Cascade-system construction is already running.",
+            )
+            return
+
+        try:
+            minimum_hydroelectric_dams = self._parse_nonnegative_integer(
+                self.minimum_hydroelectric_dams_text.get(),
+                "Minimum hydroelectric dams per cascading system",
+            )
+        except ValueError as error:
+            messagebox.showwarning(APP_NAME, str(error))
+            return
+
+        require_same_owner = self.require_same_owner_var.get()
+
+        edge_csv_path = self.cache_dir / CASCADE_SYSTEMS_CSV_NAME
+        summary_csv_path = self.cache_dir / CASCADE_SYSTEMS_SUMMARY_CSV_NAME
+
+        self.construct_cascades_button.configure(state=tk.DISABLED)
+        self.cascade_construction_status_text.set(
+            "Constructing cascade-system graphs..."
+        )
+
+        self._append_log("")
+        self._append_log("=" * 60)
+        self._append_log("Part 5 — Cascade-System Construction Started")
+        self._append_log("=" * 60)
+        self._append_log(
+            f"Part 3 matched root candidates: "
+            f"{len(self.filtered_dam_inventory_matched):,}"
+        )
+        self._append_log(
+            f"Minimum hydroelectric dams per system: "
+            f"{minimum_hydroelectric_dams:,}"
+        )
+        self._append_log(
+            f"Require same owner in each chain: {require_same_owner}"
+        )
+        self._append_log(
+            "Minimum total dams per accepted cascading system: 2"
+        )
+
+        self.cascade_construction_thread = threading.Thread(
+            target=self._run_cascade_construction_worker,
+            args=(
+                minimum_hydroelectric_dams,
+                require_same_owner,
+                edge_csv_path,
+                summary_csv_path,
+            ),
+            daemon=True,
+        )
+        self.cascade_construction_thread.start()
+
+
+    def _run_cascade_construction_worker(
+        self,
+        minimum_hydroelectric_dams: int,
+        require_same_owner: bool,
+        edge_csv_path: Path,
+        summary_csv_path: Path,
+    ) -> None:
+        """
+        Construct branching cascade systems from Part 4 downstream links.
+
+        A system is built in these stages:
+        1. Build a direct dam-to-dam downstream mapping from Part 4.
+        2. Build one downstream chain for each Part 3 root candidate.
+        3. Exclude a candidate if it is already downstream of another
+           candidate chain; remaining candidates are true roots.
+        4. Require each initial chain to have at least two dams.
+        5. Require the configured minimum count of hydroelectric dams.
+        6. Merge qualifying chains that share dam nodes into connected,
+           potentially branching cascade systems.
+        7. Export a system edge list and a companion system summary.
+
+        Tkinter widgets are never updated by this worker directly.
+        """
+
+        try:
+            if self.initialization_result is None:
+                raise RuntimeError("Initialization data are unavailable.")
+
+            if self.filtered_dam_inventory_matched is None:
+                raise RuntimeError("Part 3 filtered candidates are unavailable.")
+
+            if self.downstream_links is None:
+                raise RuntimeError("Part 4 downstream links are unavailable.")
+
+            matched_inventory = (
+                self.initialization_result.dam_inventory_matched
+                .copy()
+                .drop_duplicates(subset=["NID ID"], keep="first")
+            )
+
+            # Normalize all NID IDs as strings, preserving leading zeros and
+            # state prefixes. This ensures alignment across NID, Part 3, and
+            # Part 4 CSV-derived relationship data.
+            matched_inventory["NID ID"] = matched_inventory["NID ID"].map(
+                normalize_identifier
+            )
+            matched_inventory = matched_inventory.dropna(
+                subset=["NID ID"]
+            ).copy()
+
+            dam_records_by_id = (
+                matched_inventory
+                .set_index("NID ID", drop=False)
+                .to_dict(orient="index")
+            )
+
+            # Build a stable direct mapping from the Part 4 output. Invalid or
+            # missing downstream identifiers represent a terminal dam.
+            downstream_map: dict[str, str] = {}
+            distance_by_edge: dict[tuple[str, str], Optional[float]] = {}
+
+            for _, link_row in self.downstream_links.iterrows():
+                upstream_dam_id = normalize_identifier(link_row.get("Dam"))
+                downstream_dam_id = normalize_identifier(
+                    link_row.get("Downstream Dam")
+                )
+
+                if upstream_dam_id is None:
+                    continue
+
+                # Only preserve links whose endpoints exist in the initialized
+                # matched inventory. This rejects stale/incompatible external
+                # CSV data and prevents invalid graph nodes from being created.
+                if (
+                    downstream_dam_id is not None
+                    and upstream_dam_id in dam_records_by_id
+                    and downstream_dam_id in dam_records_by_id
+                ):
+                    downstream_map[upstream_dam_id] = downstream_dam_id
+
+                    raw_distance = link_row.get("Distance (Miles)")
+                    try:
+                        distance = float(raw_distance)
+                        if not math.isfinite(distance) or distance < 0:
+                            distance = None
+                    except (TypeError, ValueError):
+                        distance = None
+
+                    distance_by_edge[
+                        (upstream_dam_id, downstream_dam_id)
+                    ] = distance
+
+            # Part 3 creates the cascade starting-candidate set. Duplicates
+            # cannot produce duplicate systems, so normalize to a set.
+            root_candidate_ids = {
+                normalize_identifier(dam_id)
+                for dam_id in self.filtered_dam_inventory_matched["NID ID"]
+                if normalize_identifier(dam_id) is not None
+                and normalize_identifier(dam_id) in dam_records_by_id
+            }
+
+            if not root_candidate_ids:
+                raise RuntimeError(
+                    "Part 3 produced no matched root candidates for cascade construction."
+                )
+
+            def get_owner(dam_id: str) -> Optional[str]:
+                """Return a safely normalized owner value for comparison."""
+
+                owner = dam_records_by_id[dam_id].get("Owner Names")
+
+                if owner is None or pd.isna(owner):
+                    return None
+
+                normalized_owner = str(owner).strip()
+                return normalized_owner if normalized_owner else None
+
+            def have_same_owner(
+                root_dam_id: str,
+                candidate_dam_id: str,
+            ) -> bool:
+                """
+                Require known, equal owner strings.
+
+                Missing owner values do not satisfy same-owner mode because
+                ownership cannot be affirmatively verified.
+                """
+
+                root_owner = get_owner(root_dam_id)
+                candidate_owner = get_owner(candidate_dam_id)
+
+                return (
+                    root_owner is not None
+                    and candidate_owner is not None
+                    and root_owner == candidate_owner
+                )
+
+            def is_hydroelectric_dam(dam_id: str) -> bool:
+                """Use the same purpose semantics as Part 3."""
+
+                return self._has_hydroelectric_purpose(
+                    dam_records_by_id[dam_id].get("Purposes")
+                )
+
+            def build_full_chain(start_dam_id: str) -> tuple[list[str], bool]:
+                """
+                Follow direct Part 4 links until a terminal, cycle, or owner
+                boundary is encountered.
+
+                Returns:
+                    chain: ordered dam IDs from upstream root to terminus.
+                    cycle_detected: True if malformed/stale source links form
+                    a cycle; the chain is safely stopped before repetition.
+                """
+
+                chain = [start_dam_id]
+                visited = {start_dam_id}
+                current_dam_id = start_dam_id
+                cycle_detected = False
+
+                while True:
+                    downstream_dam_id = downstream_map.get(current_dam_id)
+
+                    if downstream_dam_id is None:
+                        break
+
+                    if downstream_dam_id in visited:
+                        cycle_detected = True
+                        break
+
+                    # Match the original algorithm's behavior: every
+                    # downstream dam must match the original root's owner,
+                    # rather than only matching its immediate predecessor.
+                    if (
+                        require_same_owner
+                        and not have_same_owner(
+                            start_dam_id,
+                            downstream_dam_id,
+                        )
+                    ):
+                        break
+
+                    chain.append(downstream_dam_id)
+                    visited.add(downstream_dam_id)
+                    current_dam_id = downstream_dam_id
+
+                return chain, cycle_detected
+
+            # Construct a downstream chain from every selected root candidate.
+            candidate_chains: dict[str, list[str]] = {}
+            cycle_count = 0
+
+            for candidate_dam_id in sorted(root_candidate_ids):
+                chain, cycle_detected = build_full_chain(candidate_dam_id)
+                candidate_chains[candidate_dam_id] = chain
+
+                if cycle_detected:
+                    cycle_count += 1
+
+            # A candidate located downstream in another candidate's chain is
+            # not a top-level cascade root. This preserves your original root
+            # de-duplication logic.
+            covered_candidate_ids: set[str] = set()
+
+            for candidate_dam_id, chain in candidate_chains.items():
+                del candidate_dam_id
+
+                for downstream_dam_id in chain[1:]:
+                    if downstream_dam_id in root_candidate_ids:
+                        covered_candidate_ids.add(downstream_dam_id)
+
+            true_root_ids = sorted(
+                root_candidate_ids - covered_candidate_ids
+            )
+
+            # A qualifying initial cascade always requires >= 2 total dams,
+            # independently of whether min hydro is 0, 1, 2, or greater.
+            initial_chains = [
+                candidate_chains[root_dam_id]
+                for root_dam_id in true_root_ids
+                if len(candidate_chains[root_dam_id]) >= 2
+            ]
+
+            total_dam_filter_count = len(initial_chains)
+
+            def count_hydroelectric_dams(chain: list[str]) -> int:
+                return sum(
+                    1
+                    for dam_id in chain
+                    if is_hydroelectric_dam(dam_id)
+                )
+
+            qualifying_chains = [
+                chain
+                for chain in initial_chains
+                if count_hydroelectric_dams(chain)
+                >= minimum_hydroelectric_dams
+            ]
+
+            # Union-find groups chains sharing at least one dam node. That
+            # turns convergent linear chains into one connected system.
+            parent: dict[str, str] = {}
+
+            def dsu_find(dam_id: str) -> str:
+                parent.setdefault(dam_id, dam_id)
+
+                while parent[dam_id] != dam_id:
+                    parent[dam_id] = parent[parent[dam_id]]
+                    dam_id = parent[dam_id]
+
+                return dam_id
+
+            def dsu_union(dam_id_a: str, dam_id_b: str) -> None:
+                root_a = dsu_find(dam_id_a)
+                root_b = dsu_find(dam_id_b)
+
+                if root_a != root_b:
+                    parent[root_a] = root_b
+
+            for chain in qualifying_chains:
+                for dam_id in chain:
+                    dsu_find(dam_id)
+
+                for upstream_dam_id, downstream_dam_id in zip(
+                    chain[:-1],
+                    chain[1:],
+                ):
+                    dsu_union(upstream_dam_id, downstream_dam_id)
+
+            group_nodes: dict[str, set[str]] = {}
+            group_edges: dict[str, set[tuple[str, str]]] = {}
+
+            for chain in qualifying_chains:
+                group_key = dsu_find(chain[0])
+
+                group_nodes.setdefault(group_key, set()).update(chain)
+                group_edges.setdefault(group_key, set()).update(
+                    zip(chain[:-1], chain[1:])
+                )
+
+            edge_rows: list[dict[str, Any]] = []
+            summary_rows: list[dict[str, Any]] = []
+            cascade_graphs: dict[str, nx.DiGraph] = {}
+
+            for group_key in sorted(group_nodes):
+                system_nodes = group_nodes[group_key]
+                system_edges = group_edges[group_key]
+
+                # A defensive check preserves the universal two-dam minimum
+                # even if future merge logic is altered.
+                if len(system_nodes) < 2:
+                    continue
+
+                incoming_edge_count = {
+                    dam_id: 0
+                    for dam_id in system_nodes
+                }
+
+                for _, downstream_dam_id in system_edges:
+                    incoming_edge_count[downstream_dam_id] += 1
+
+                root_dams_in_system = sorted(
+                    dam_id
+                    for dam_id, count in incoming_edge_count.items()
+                    if count == 0
+                )
+
+                # Every valid directed acyclic system should have a root. If
+                # malformed data produced otherwise, skip safely and report it.
+                if not root_dams_in_system:
+                    continue
+
+                system_id = min(root_dams_in_system)
+
+                hydroelectric_count = sum(
+                    1
+                    for dam_id in system_nodes
+                    if is_hydroelectric_dam(dam_id)
+                )
+
+                # A merged graph could theoretically change system-level
+                # composition. Reapply both requirements as an explicit,
+                # auditable final validation.
+                if (
+                    len(system_nodes) < 2
+                    or hydroelectric_count < minimum_hydroelectric_dams
+                ):
+                    continue
+
+                cascade_graph = nx.DiGraph()
+
+                for dam_id in sorted(system_nodes):
+                    dam_record = dam_records_by_id[dam_id]
+
+                    # Normalize pandas missing values before saving graph
+                    # attributes. Do not use pickle on untrusted sources.
+                    node_attributes = {
+                        key: (
+                            None
+                            if pd.isna(value)
+                            else value
+                        )
+                        for key, value in dam_record.items()
+                    }
+
+                    node_attributes["NID ID"] = dam_id
+                    node_attributes["name"] = dam_record.get("Dam Name")
+                    node_attributes["purposes"] = dam_record.get("Purposes")
+                    node_attributes["owner"] = dam_record.get("Owner Names")
+                    node_attributes["is_hydroelectric"] = (
+                        is_hydroelectric_dam(dam_id)
+                    )
+
+                    cascade_graph.add_node(
+                        dam_id,
+                        **node_attributes,
+                    )
+
+                for upstream_dam_id, downstream_dam_id in sorted(system_edges):
+                    distance = distance_by_edge.get(
+                        (upstream_dam_id, downstream_dam_id)
+                    )
+
+                    cascade_graph.add_edge(
+                        upstream_dam_id,
+                        downstream_dam_id,
+                        distance_miles=distance,
+                    )
+
+                    upstream_record = dam_records_by_id[upstream_dam_id]
+                    downstream_record = dam_records_by_id[downstream_dam_id]
+
+                    edge_rows.append(
+                        {
+                            "System ID": system_id,
+                            "Upstream Dam ID": upstream_dam_id,
+                            "Upstream Dam Name": upstream_record.get(
+                                "Dam Name"
+                            ),
+                            "Upstream Dam Purposes": upstream_record.get(
+                                "Purposes"
+                            ),
+                            "Upstream Dam Owner": upstream_record.get(
+                                "Owner Names"
+                            ),
+                            "Downstream Dam ID": downstream_dam_id,
+                            "Downstream Dam Name": downstream_record.get(
+                                "Dam Name"
+                            ),
+                            "Downstream Dam Purposes": downstream_record.get(
+                                "Purposes"
+                            ),
+                            "Downstream Dam Owner": downstream_record.get(
+                                "Owner Names"
+                            ),
+                            "Distance (Miles)": (
+                                round(distance, 2)
+                                if distance is not None
+                                else None
+                            ),
+                        }
+                    )
+
+                summary_rows.append(
+                    {
+                        "System ID": system_id,
+                        "Root Dam IDs": "; ".join(root_dams_in_system),
+                        "Root Dam Names": "; ".join(
+                            str(
+                                dam_records_by_id[dam_id].get(
+                                    "Dam Name",
+                                    dam_id,
+                                )
+                            )
+                            for dam_id in root_dams_in_system
+                        ),
+                        "Total Dams": len(system_nodes),
+                        "Hydroelectric Dams": hydroelectric_count,
+                    }
+                )
+
+                cascade_graphs[system_id] = cascade_graph
+
+            edge_dataframe = pd.DataFrame(
+                edge_rows,
+                columns=[
+                    "System ID",
+                    "Upstream Dam ID",
+                    "Upstream Dam Name",
+                    "Upstream Dam Purposes",
+                    "Upstream Dam Owner",
+                    "Downstream Dam ID",
+                    "Downstream Dam Name",
+                    "Downstream Dam Purposes",
+                    "Downstream Dam Owner",
+                    "Distance (Miles)",
+                ],
+            )
+
+            summary_dataframe = pd.DataFrame(
+                summary_rows,
+                columns=[
+                    "System ID",
+                    "Root Dam IDs",
+                    "Root Dam Names",
+                    "Total Dams",
+                    "Hydroelectric Dams",
+                ],
+            )
+
+            if not edge_dataframe.empty:
+                edge_dataframe = edge_dataframe.sort_values(
+                    ["System ID", "Upstream Dam ID", "Downstream Dam ID"],
+                    kind="stable",
+                ).reset_index(drop=True)
+
+            if not summary_dataframe.empty:
+                summary_dataframe = summary_dataframe.sort_values(
+                    "System ID",
+                    kind="stable",
+                ).reset_index(drop=True)
+
+            # The existing atomic CSV writer is generic despite its original
+            # Part 4 name. It also protects spreadsheet users from formula
+            # injection in externally sourced dam-name/owner text.
+            write_downstream_links_csv(
+                edge_dataframe,
+                edge_csv_path,
+            )
+            write_downstream_links_csv(
+                summary_dataframe,
+                summary_csv_path,
+            )
+
+            multi_root_system_count = sum(
+                1
+                for graph in cascade_graphs.values()
+                if sum(
+                    1
+                    for dam_id in graph.nodes
+                    if graph.in_degree(dam_id) == 0
+                ) > 1
+            )
+
+            self.ui_message_queue.put(
+                (
+                    "cascade_construction_success",
+                    {
+                        "cascade_graphs": cascade_graphs,
+                        "edge_dataframe": edge_dataframe,
+                        "summary_dataframe": summary_dataframe,
+                        "edge_csv_path": edge_csv_path,
+                        "summary_csv_path": summary_csv_path,
+                        "root_candidate_count": len(root_candidate_ids),
+                        "covered_candidate_count": len(covered_candidate_ids),
+                        "true_root_count": len(true_root_ids),
+                        "two_dam_chain_count": total_dam_filter_count,
+                        "qualifying_chain_count": len(qualifying_chains),
+                        "system_count": len(cascade_graphs),
+                        "edge_count": len(edge_dataframe),
+                        "multi_root_system_count": multi_root_system_count,
+                        "cycle_count": cycle_count,
+                        "minimum_hydroelectric_dams": (
+                            minimum_hydroelectric_dams
+                        ),
+                        "require_same_owner": require_same_owner,
+                    },
+                )
+            )
+
+        except Exception as error:
+            self.ui_message_queue.put(
+                ("cascade_construction_failure", str(error))
+            )
+    def refresh_cascade_system_list(self) -> None:
+        """
+        Restore the complete set of constructed systems in Part 6.
+
+        The Show All System IDs button deliberately clears query restrictions,
+        ensuring the combobox and results table return to their full state.
+        """
+
+        if not self.cascade_graphs:
+            self.cascade_system_combobox.configure(values=[])
+
+            self.selected_system_id_text.set("")
+            self.cascade_query_status_text.set(
+                "No cascade systems are currently available."
+            )
+
+            self._display_cascade_query_matches([])
+
+            self._display_cascade_query_results(
+                [
+                    (
+                        "Status",
+                        "No cascades have been constructed under the current criteria.",
+                    )
+                ]
+            )
+            return
+
+        self.clear_cascade_system_query()
+
+
+    def _get_selected_cascade_graph(self) -> tuple[Optional[str], Optional[nx.DiGraph]]:
+        """
+        Validate the selected system ID and return its NetworkX graph.
+
+        Returns:
+            tuple:
+                - (system_id, graph) for a valid selected system;
+                - (None, None) and a user warning for an invalid selection.
+        """
+
+        if not self.cascade_graphs:
+            messagebox.showwarning(
+                APP_NAME,
+                "No cascade systems are available. Run Part 5 first.",
+            )
+            return None, None
+
+        system_id = self.selected_system_id_text.get().strip()
+
+        if not system_id:
+            messagebox.showwarning(
+                APP_NAME,
+                "Select or enter a cascade System ID.",
+            )
+            return None, None
+
+        cascade_graph = self.cascade_graphs.get(system_id)
+
+        if cascade_graph is None:
+            messagebox.showwarning(
+                APP_NAME,
+                f"No constructed cascade system was found for System ID '{system_id}'.",
+            )
+            return None, None
+
+        return system_id, cascade_graph
+
+    def _display_cascade_query_results(
+        self,
+        result_rows: list[tuple[str, str]],
+    ) -> None:
+        """Replace the Part 6 selected-system overview table."""
+
+        for item_id in self.cascade_query_results_tree.get_children():
+            self.cascade_query_results_tree.delete(item_id)
+
+        for metric, value in result_rows:
+            self.cascade_query_results_tree.insert(
+                "",
+                tk.END,
+                values=(metric, value),
+            )
+
+    def _update_cascade_query_control_states(self) -> None:
+        """
+        Enable a query input only when its checkbox is selected.
+
+        This makes each query type independently optional and communicates
+        clearly which criteria will apply during the next search.
+        """
+
+        self.query_state_entry.configure(
+            state=(
+                "normal"
+                if self.query_state_enabled_var.get()
+                else "disabled"
+            )
+        )
+
+        self.query_nid_entry.configure(
+            state=(
+                "normal"
+                if self.query_nid_enabled_var.get()
+                else "disabled"
+            )
+        )
+
+        self.query_river_entry.configure(
+            state=(
+                "normal"
+                if self.query_river_enabled_var.get()
+                else "disabled"
+            )
+        )
+
+
+    @staticmethod
+    def _get_node_attribute_case_insensitive(
+        attributes: dict[str, Any],
+        candidate_names: tuple[str, ...],
+    ) -> Any:
+        """
+        Retrieve a graph node attribute using case-insensitive field matching.
+
+        NID field naming can vary by pygeohydro/NID release. For example, a
+        state field may appear as State, STATE, or state. This helper avoids
+        making Part 6 dependent on one exact source-column spelling.
+        """
+
+        normalized_attributes = {
+            str(key).casefold(): value
+            for key, value in attributes.items()
+        }
+
+        for candidate_name in candidate_names:
+            value = normalized_attributes.get(candidate_name.casefold())
+
+            if value is not None:
+                return value
+
+        return None
+
+
+    def _get_dam_state_code(
+        self,
+        dam_id: str,
+        attributes: dict[str, Any],
+    ) -> Optional[str]:
+        """
+        Resolve a two-letter state code for a dam node.
+
+        The NID State field is preferred. If it is absent or unusable, use the
+        first two characters of the NID ID as a compatibility fallback. Your
+        original cascade-map workflow used this NID prefix convention for
+        state-based output organization.
+        """
+
+        raw_state = self._get_node_attribute_case_insensitive(
+            attributes,
+            (
+                "State",
+            ),
+        )
+
+        if raw_state is not None:
+            state_text = str(raw_state).strip().upper()
+
+            if len(state_text) == 2 and state_text.isalpha():
+                return state_text
+
+        normalized_dam_id = normalize_identifier(dam_id)
+
+        if normalized_dam_id is not None:
+            prefix = normalized_dam_id[:2].upper()
+
+            if len(prefix) == 2 and prefix.isalpha():
+                return prefix
+
+        return None
+
+
+    def _get_dam_river_name(
+        self,
+        attributes: dict[str, Any],
+    ) -> Optional[str]:
+        """
+        Return a dam's NID river/stream name.
+
+        Part 1 preserves the full NID record as cascade graph node attributes,
+        and the authoritative NID field is 'River or Stream Name'.
+        """
+
+        raw_river_name = attributes.get("River or Stream Name")
+
+        if raw_river_name is None:
+            return None
+
+        try:
+            if pd.isna(raw_river_name):
+                return None
+        except (TypeError, ValueError):
+            # Preserve normal conversion for a non-scalar future value.
+            pass
+
+        river_name = str(raw_river_name).strip()
+
+        return river_name if river_name else None
+
+
+    @staticmethod
+    def _system_root_dam_ids(
+        cascade_graph: nx.DiGraph,
+    ) -> list[str]:
+        """Return stable, sorted root dam IDs for one cascade system."""
+
+        return sorted(
+            str(dam_id)
+            for dam_id in cascade_graph.nodes
+            if cascade_graph.in_degree(dam_id) == 0
+        )
+
+
+    @staticmethod
+    def _system_hydroelectric_dam_count(
+        cascade_graph: nx.DiGraph,
+    ) -> int:
+        """Count hydroelectric dam nodes in a constructed cascade system."""
+
+        return sum(
+            1
+            for _, attributes in cascade_graph.nodes(data=True)
+            if bool(attributes.get("is_hydroelectric", False))
+        )
+
+
+    def _display_cascade_query_matches(
+        self,
+        matching_system_ids: list[str],
+    ) -> None:
+        """
+        Populate the Part 6 results table with matching cascade systems.
+
+        The Treeview item ID is the system ID. That lets a row selection
+        directly activate the selected system for reporting and mapping.
+        """
+
+        for item_id in self.cascade_query_matches_tree.get_children():
+            self.cascade_query_matches_tree.delete(item_id)
+
+        for system_id in matching_system_ids:
+            cascade_graph = self.cascade_graphs[system_id]
+            root_dam_ids = self._system_root_dam_ids(cascade_graph)
+
+            self.cascade_query_matches_tree.insert(
+                "",
+                tk.END,
+                iid=system_id,
+                values=(
+                    system_id,
+                    "; ".join(root_dam_ids),
+                    cascade_graph.number_of_nodes(),
+                    self._system_hydroelectric_dam_count(cascade_graph),
+                ),
+            )
+
+
+    def _select_cascade_system_from_query_result(
+        self,
+        _event: Any = None,
+    ) -> None:
+        """
+        Make a selected query-results row the active Part 6 system.
+
+        This connects the filter-result list directly to the existing detailed
+        log/report/map functions.
+        """
+
+        selected_items = self.cascade_query_matches_tree.selection()
+
+        if not selected_items:
+            return
+
+        system_id = selected_items[0]
+
+        if system_id not in self.cascade_graphs:
+            return
+
+        self.selected_system_id_text.set(system_id)
+        self._update_selected_system_details()
+
+
+    def clear_cascade_system_query(self) -> None:
+        """
+        Disable all filters and display every constructed cascade system.
+
+        This is also useful after a restrictive search, because it restores
+        the System ID combobox to the complete constructed-system set.
+        """
+
+        self.query_state_enabled_var.set(False)
+        self.query_nid_enabled_var.set(False)
+        self.query_river_enabled_var.set(False)
+
+        self.query_state_text.set("")
+        self.query_nid_text.set("")
+        self.query_river_text.set("")
+
+        self._update_cascade_query_control_states()
+        self.run_cascade_system_query()
+
+
+    def run_cascade_system_query(self) -> None:
+        """
+        Find cascade systems meeting the enabled Part 6 criteria.
+
+        Enabled criteria combine with AND logic:
+
+        - State: the system contains at least one dam in the requested state.
+        - NID ID: the system contains the requested dam ID.
+        - River: the system contains at least one dam whose NID river/stream
+          name contains the entered search text, case-insensitively.
+
+        The state and river criteria are existential at the system level. That
+        means they may be satisfied by the same dam or by different dams in
+        the same connected cascade system.
+        """
+
+        if not self.cascade_graphs:
+            messagebox.showwarning(
+                APP_NAME,
+                "No cascade systems are available. Run Part 5 first.",
+            )
+            return
+
+        state_filter_enabled = self.query_state_enabled_var.get()
+        nid_filter_enabled = self.query_nid_enabled_var.get()
+        river_filter_enabled = self.query_river_enabled_var.get()
+
+        requested_state = self.query_state_text.get().strip().upper()
+        requested_nid_id = self.query_nid_text.get().strip()
+        requested_river = self.query_river_text.get().strip()
+
+        # Validate only active criteria. Disabled query fields have no effect.
+        if state_filter_enabled:
+            if (
+                len(requested_state) != 2
+                or not requested_state.isalpha()
+            ):
+                messagebox.showwarning(
+                    APP_NAME,
+                    "State search requires a two-letter state abbreviation, "
+                    "such as GA, AL, or NY.",
+                )
+                return
+
+        if nid_filter_enabled and not requested_nid_id:
+            messagebox.showwarning(
+                APP_NAME,
+                "Enter an NID ID or disable the NID ID query criterion.",
+            )
+            return
+
+        if river_filter_enabled and not requested_river:
+            messagebox.showwarning(
+                APP_NAME,
+                "Enter a river/stream name or disable the river query criterion.",
+            )
+            return
+
+        requested_nid_normalized = (
+            requested_nid_id.casefold()
+            if nid_filter_enabled
+            else ""
+        )
+
+        requested_river_normalized = (
+            requested_river.casefold()
+            if river_filter_enabled
+            else ""
+        )
+
+        matching_system_ids: list[str] = []
+        matching_details: dict[str, dict[str, list[str]]] = {}
+
+        for system_id in sorted(self.cascade_graphs):
+            cascade_graph = self.cascade_graphs[system_id]
+
+            state_matching_dams: list[str] = []
+            nid_matching_dams: list[str] = []
+            river_matching_dams: list[str] = []
+
+            for dam_id, attributes in cascade_graph.nodes(data=True):
+                normalized_dam_id = normalize_identifier(dam_id)
+
+                if (
+                    state_filter_enabled
+                    and self._get_dam_state_code(
+                        str(dam_id),
+                        attributes,
+                    ) == requested_state
+                ):
+                    state_matching_dams.append(str(dam_id))
+
+                if (
+                    nid_filter_enabled
+                    and normalized_dam_id is not None
+                    and normalized_dam_id.casefold()
+                    == requested_nid_normalized
+                ):
+                    nid_matching_dams.append(str(dam_id))
+
+                if river_filter_enabled:
+                    river_name = self._get_dam_river_name(attributes)
+
+                    if (
+                        river_name is not None
+                        and requested_river_normalized
+                        in river_name.casefold()
+                    ):
+                        river_matching_dams.append(
+                            f"{dam_id} ({river_name})"
+                        )
+
+            # No enabled condition means "show all systems." Otherwise, each
+            # enabled condition must have at least one matching dam node.
+            matches_state = (
+                not state_filter_enabled
+                or bool(state_matching_dams)
+            )
+            matches_nid = (
+                not nid_filter_enabled
+                or bool(nid_matching_dams)
+            )
+            matches_river = (
+                not river_filter_enabled
+                or bool(river_matching_dams)
+            )
+
+            if matches_state and matches_nid and matches_river:
+                matching_system_ids.append(system_id)
+                matching_details[system_id] = {
+                    "state": sorted(state_matching_dams),
+                    "nid": sorted(nid_matching_dams),
+                    "river": sorted(river_matching_dams),
+                }
+
+        # Preserve the exact system set used for the current query. Part 6's
+        # national overview map uses this value rather than independently
+        # rerunning or potentially differing from the visible query results.
+        self.last_cascade_query_system_ids = matching_system_ids.copy()
+
+        # Update both the results table and the selected-system combobox.
+        self._display_cascade_query_matches(matching_system_ids)
+
+        self.cascade_system_combobox.configure(
+            values=matching_system_ids
+        )
+
+        if matching_system_ids:
+            current_system_id = self.selected_system_id_text.get().strip()
+
+            if current_system_id not in matching_system_ids:
+                self.selected_system_id_text.set(matching_system_ids[0])
+
+            self._update_selected_system_details()
+
+        else:
+            self.selected_system_id_text.set("")
+
+            self._display_cascade_query_results(
+                [
+                    (
+                        "Status",
+                        "No cascading systems meet the active query criteria.",
+                    )
+                ]
+            )
+
+        active_criteria_descriptions: list[str] = []
+
+        if state_filter_enabled:
+            active_criteria_descriptions.append(
+                f"state = {requested_state}"
+            )
+
+        if nid_filter_enabled:
+            active_criteria_descriptions.append(
+                f"NID ID = {requested_nid_id}"
+            )
+
+        if river_filter_enabled:
+            active_criteria_descriptions.append(
+                f"river/stream contains {requested_river!r}"
+            )
+
+        criteria_description = (
+            "; ".join(active_criteria_descriptions)
+            if active_criteria_descriptions
+            else "No active filters; all constructed systems shown"
+        )
+
+        self.cascade_query_status_text.set(
+            f"{len(matching_system_ids):,} of "
+            f"{len(self.cascade_graphs):,} cascade system(s) match."
+        )
+
+        # ------------------------------------------------------------------
+        # Shared-log query output
+        # ------------------------------------------------------------------
+        self._append_log("")
+        self._append_log("=" * 60)
+        self._append_log("Part 6 — Cascade-System Query Results")
+        self._append_log("=" * 60)
+        self._append_log(f"Search criteria: {criteria_description}")
+        self._append_log(
+            f"Matching systems: {len(matching_system_ids):,} of "
+            f"{len(self.cascade_graphs):,}"
+        )
+
+        if not matching_system_ids:
+            self._append_log(
+                "No cascading systems met all enabled query criteria."
+            )
+            self._append_log("")
+            return
+
+        self._append_log("")
+
+        for system_id in matching_system_ids:
+            cascade_graph = self.cascade_graphs[system_id]
+            root_dam_ids = self._system_root_dam_ids(cascade_graph)
+            hydroelectric_count = self._system_hydroelectric_dam_count(
+                cascade_graph
+            )
+
+            self._append_log(
+                f"System ID: {system_id}"
+            )
+            self._append_log(
+                f"  Root Dam ID(s): {'; '.join(root_dam_ids)}"
+            )
+            self._append_log(
+                f"  Total Dams: {cascade_graph.number_of_nodes():,}"
+            )
+            self._append_log(
+                f"  Hydroelectric Dams: {hydroelectric_count:,}"
+            )
+
+            details = matching_details[system_id]
+
+            if state_filter_enabled:
+                self._append_log(
+                    f"  State-matching Dam ID(s): "
+                    f"{'; '.join(details['state'])}"
+                )
+
+            if nid_filter_enabled:
+                self._append_log(
+                    f"  NID-matching Dam ID(s): "
+                    f"{'; '.join(details['nid'])}"
+                )
+
+            if river_filter_enabled:
+                self._append_log(
+                    f"  River-matching Dam(s): "
+                    f"{'; '.join(details['river'])}"
+                )
+
+            self._append_log("")
+
+        self._append_log(
+            "Select a matching system in the results table to inspect its "
+            "detailed graph report or generate an interactive map."
+        )
+        self._append_log("")
+
+    @staticmethod
+    def _display_value(value: Any, fallback: str = "Unavailable") -> str:
+        """
+        Convert a potentially missing NID attribute to safe readable text.
+
+        The application uses None for normalized missing graph attributes, but
+        this method also tolerates NaN values if a future dataset contributes
+        one.
+        """
+
+        if value is None:
+            return fallback
+
+        try:
+            if pd.isna(value):
+                return fallback
+        except (TypeError, ValueError):
+            # Some non-scalar values cannot be evaluated by pd.isna in a
+            # simple boolean context. Convert those values normally.
+            pass
+
+        text = str(value).strip()
+        return text if text else fallback
+
+    def _update_selected_system_details(self) -> None:
+        """
+        Populate the Part 6 system overview table for the current selection.
+
+        This produces a compact high-level view. The full dam-node and
+        downstream-edge detail is written by print_selected_cascade_graph().
+        """
+
+        system_id = self.selected_system_id_text.get().strip()
+        cascade_graph = self.cascade_graphs.get(system_id)
+
+        if cascade_graph is None:
+            self._display_cascade_query_results(
+                [
+                    (
+                        "Status",
+                        "Select a valid System ID to display its overview.",
+                    )
+                ]
+            )
+            return
+
+        root_dams = sorted(
+            dam_id
+            for dam_id in cascade_graph.nodes
+            if cascade_graph.in_degree(dam_id) == 0
+        )
+
+        terminal_dams = sorted(
+            dam_id
+            for dam_id in cascade_graph.nodes
+            if cascade_graph.out_degree(dam_id) == 0
+        )
+
+        hydroelectric_count = sum(
+            1
+            for _, attributes in cascade_graph.nodes(data=True)
+            if bool(attributes.get("is_hydroelectric", False))
+        )
+
+        root_descriptions = "; ".join(
+            (
+                f"{dam_id} "
+                f"({self._display_value(cascade_graph.nodes[dam_id].get('name'))})"
+            )
+            for dam_id in root_dams
+        )
+
+        terminal_descriptions = "; ".join(
+            (
+                f"{dam_id} "
+                f"({self._display_value(cascade_graph.nodes[dam_id].get('name'))})"
+            )
+            for dam_id in terminal_dams
+        )
+
+        self._display_cascade_query_results(
+            [
+                ("System ID", system_id),
+                (
+                    "Total dams",
+                    f"{cascade_graph.number_of_nodes():,}",
+                ),
+                (
+                    "Direct downstream links",
+                    f"{cascade_graph.number_of_edges():,}",
+                ),
+                (
+                    "Hydroelectric dams",
+                    f"{hydroelectric_count:,}",
+                ),
+                (
+                    "Root dam(s)",
+                    root_descriptions or "Unavailable",
+                ),
+                (
+                    "Terminal dam(s)",
+                    terminal_descriptions or "Unavailable",
+                ),
+            ]
+        )
+
+        self.cascade_query_status_text.set(
+            f"System {system_id}: "
+            f"{cascade_graph.number_of_nodes():,} dam(s), "
+            f"{cascade_graph.number_of_edges():,} direct link(s)."
+        )
+
+    def print_selected_cascade_graph(self) -> None:
+        """
+        Write a detailed selected-cascade report to the shared Application Log.
+
+        This is the Tkinter equivalent of the original print_cascade_graph()
+        function. It explicitly iterates graph edges rather than assuming a
+        linear chain, correctly representing merged systems with multiple
+        upstream roots converging downstream.
+        """
+
+        system_id, cascade_graph = self._get_selected_cascade_graph()
+
+        if system_id is None or cascade_graph is None:
+            return
+
+        root_dams = sorted(
+            dam_id
+            for dam_id in cascade_graph.nodes
+            if cascade_graph.in_degree(dam_id) == 0
+        )
+
+        terminal_dams = sorted(
+            dam_id
+            for dam_id in cascade_graph.nodes
+            if cascade_graph.out_degree(dam_id) == 0
+        )
+
+        hydroelectric_count = sum(
+            1
+            for _, attributes in cascade_graph.nodes(data=True)
+            if bool(attributes.get("is_hydroelectric", False))
+        )
+
+        root_descriptions = ", ".join(
+            (
+                f"{dam_id} "
+                f"({self._display_value(cascade_graph.nodes[dam_id].get('name'))})"
+            )
+            for dam_id in root_dams
+        )
+
+        terminal_descriptions = ", ".join(
+            (
+                f"{dam_id} "
+                f"({self._display_value(cascade_graph.nodes[dam_id].get('name'))})"
+            )
+            for dam_id in terminal_dams
+        )
+
+        self._append_log("")
+        self._append_log("=" * 60)
+        self._append_log(f"Cascade System: {system_id}")
+        self._append_log("=" * 60)
+        self._append_log(
+            f"Number of nodes (dams): {cascade_graph.number_of_nodes():,}"
+        )
+        self._append_log(
+            f"Number of edges (downstream links): "
+            f"{cascade_graph.number_of_edges():,}"
+        )
+        self._append_log(
+            f"Root dam(s): {root_descriptions or 'Unavailable'}"
+        )
+        self._append_log(
+            f"Terminal dam(s): {terminal_descriptions or 'Unavailable'}"
+        )
+        self._append_log(
+            f"Hydroelectric dams in this system: {hydroelectric_count:,}"
+        )
+
+        self._append_log("")
+        self._append_log("Nodes:")
+
+        # Sort by NID ID for stable and repeatable research output.
+        for dam_id in sorted(cascade_graph.nodes):
+            attributes = cascade_graph.nodes[dam_id]
+
+            dam_name = self._display_value(attributes.get("name"))
+            owner = self._display_value(attributes.get("owner"))
+            latitude = self._display_value(attributes.get("Latitude"))
+            longitude = self._display_value(attributes.get("Longitude"))
+            purposes = self._display_value(attributes.get("purposes"))
+
+            hydroelectric_tag = (
+                "[hydroelectric]"
+                if bool(attributes.get("is_hydroelectric", False))
+                else "[non-hydroelectric]"
+            )
+
+            self._append_log(
+                f"  {hydroelectric_tag} {dam_id}: {dam_name!r} "
+                f"(owner={owner}, lat={latitude}, lon={longitude})"
+            )
+            self._append_log(f"    Purposes: {purposes}")
+
+        self._append_log("")
+        self._append_log("Edges:")
+
+        # Sort source and target IDs to keep log output deterministic.
+        for upstream_dam_id, downstream_dam_id, edge_attributes in sorted(
+            cascade_graph.edges(data=True),
+            key=lambda edge: (str(edge[0]), str(edge[1])),
+        ):
+            distance = edge_attributes.get("distance_miles")
+
+            if distance is None:
+                distance_text = "unavailable"
+            else:
+                try:
+                    distance_text = f"{float(distance):.2f} miles"
+                except (TypeError, ValueError):
+                    distance_text = "unavailable"
+
+            upstream_name = self._display_value(
+                cascade_graph.nodes[upstream_dam_id].get("name")
+            )
+            downstream_name = self._display_value(
+                cascade_graph.nodes[downstream_dam_id].get("name")
+            )
+
+            self._append_log(
+                f"  {upstream_dam_id} ({upstream_name}) -> "
+                f"{downstream_dam_id} ({downstream_name}): "
+                f"{distance_text}"
+            )
+
+        self._append_log("")
+        self._append_log(
+            f"Printed detailed information for cascade system {system_id}."
+        )
+
+    @staticmethod
+    def _get_valid_map_coordinate(
+        value: Any,
+        minimum: float,
+        maximum: float,
+    ) -> Optional[float]:
+        """
+        Validate and normalize a geographic coordinate for map rendering.
+
+        Invalid NID coordinate fields are excluded from the map rather than
+        allowing a malformed record to prevent visualization of an otherwise
+        valid cascade system.
+        """
+
+        try:
+            coordinate = float(value)
+        except (TypeError, ValueError):
+            return None
+
+        if not math.isfinite(coordinate):
+            return None
+
+        if coordinate < minimum or coordinate > maximum:
+            return None
+
+        return coordinate
+
+    def generate_selected_cascade_map(self) -> None:
+        """
+        Build, save, and open an interactive Folium map for one cascade system.
+
+        The generated HTML is displayed in the user's external browser because
+        the standard Tkinter library does not provide a maintained, secure,
+        full-featured embedded web renderer.
+        """
+
+        system_id, cascade_graph = self._get_selected_cascade_graph()
+
+        if system_id is None or cascade_graph is None:
+            return
+
+        # Build a coordinate map first. This ensures only nodes with valid
+        # coordinates participate in marker and line generation.
+        coordinates_by_dam: dict[str, tuple[float, float]] = {}
+
+        for dam_id, attributes in cascade_graph.nodes(data=True):
+            latitude = self._get_valid_map_coordinate(
+                attributes.get("Latitude"),
+                -90.0,
+                90.0,
+            )
+            longitude = self._get_valid_map_coordinate(
+                attributes.get("Longitude"),
+                -180.0,
+                180.0,
+            )
+
+            if latitude is not None and longitude is not None:
+                coordinates_by_dam[dam_id] = (latitude, longitude)
+
+        if not coordinates_by_dam:
+            messagebox.showerror(
+                APP_NAME,
+                f"System {system_id} has no valid dam coordinates available for mapping.",
+            )
+            return
+
+        root_dams = {
+            dam_id
+            for dam_id in cascade_graph.nodes
+            if cascade_graph.in_degree(dam_id) == 0
+        }
+
+        terminal_dams = {
+            dam_id
+            for dam_id in cascade_graph.nodes
+            if cascade_graph.out_degree(dam_id) == 0
+        }
+
+        latitude_values = [
+            latitude
+            for latitude, _ in coordinates_by_dam.values()
+        ]
+        longitude_values = [
+            longitude
+            for _, longitude in coordinates_by_dam.values()
+        ]
+
+        map_center = [
+            sum(latitude_values) / len(latitude_values),
+            sum(longitude_values) / len(longitude_values),
+        ]
+
+        cascade_map = folium.Map(
+            location=map_center,
+            zoom_start=8,
+            tiles="CartoDB positron",
+            control_scale=True,
+        )
+
+        # Add visually distinct dam markers by graph role.
+        for dam_id, attributes in cascade_graph.nodes(data=True):
+            coordinate = coordinates_by_dam.get(dam_id)
+
+            if coordinate is None:
+                continue
+
+            if dam_id in root_dams:
+                marker_color = "green"
+                role_label = "Root dam"
+            elif dam_id in terminal_dams:
+                marker_color = "red"
+                role_label = "Terminal dam"
+            elif bool(attributes.get("is_hydroelectric", False)):
+                marker_color = "blue"
+                role_label = "Intermediate hydroelectric dam"
+            else:
+                marker_color = "gray"
+                role_label = "Intermediate non-hydroelectric dam"
+
+            dam_name = self._display_value(attributes.get("name"))
+            owner = self._display_value(attributes.get("owner"))
+            purposes = self._display_value(attributes.get("purposes"))
+            hydroelectric_text = (
+                "Hydroelectric"
+                if bool(attributes.get("is_hydroelectric", False))
+                else "Non-hydroelectric"
+            )
+
+            # Escape all data-source values before HTML interpolation. NID
+            # text is external data and must never be trusted as safe markup.
+            popup_html = (
+                "<div style='min-width:260px;'>"
+                f"<strong>{html.escape(dam_name)}</strong><br>"
+                f"<strong>NID ID:</strong> {html.escape(str(dam_id))}<br>"
+                f"<strong>Role:</strong> {html.escape(role_label)}<br>"
+                f"<strong>Type:</strong> {html.escape(hydroelectric_text)}<br>"
+                f"<strong>Owner:</strong> {html.escape(owner)}<br>"
+                f"<strong>Purposes:</strong> {html.escape(purposes)}"
+                "</div>"
+            )
+
+            folium.Marker(
+                location=coordinate,
+                popup=folium.Popup(
+                    popup_html,
+                    max_width=350,
+                ),
+                tooltip=(
+                    f"{dam_name} "
+                    f"({hydroelectric_text}; {role_label})"
+                ),
+                icon=folium.Icon(
+                    color=marker_color,
+                    icon="tint",
+                    prefix="fa",
+                ),
+            ).add_to(cascade_map)
+
+        # Draw each known direct downstream edge. A straight geographic line is
+        # a visualization aid only; the calculated river route distance remains
+        # available in the edge tooltip and labels.
+        skipped_edge_count = 0
+
+        for upstream_dam_id, downstream_dam_id, edge_attributes in cascade_graph.edges(
+            data=True
+        ):
+            upstream_coordinate = coordinates_by_dam.get(upstream_dam_id)
+            downstream_coordinate = coordinates_by_dam.get(downstream_dam_id)
+
+            if upstream_coordinate is None or downstream_coordinate is None:
+                skipped_edge_count += 1
+                continue
+
+            distance = edge_attributes.get("distance_miles")
+
+            try:
+                distance_text = (
+                    f"{float(distance):.2f} river miles"
+                    if distance is not None
+                    else "distance unavailable"
+                )
+            except (TypeError, ValueError):
+                distance_text = "distance unavailable"
+
+            upstream_name = self._display_value(
+                cascade_graph.nodes[upstream_dam_id].get("name")
+            )
+            downstream_name = self._display_value(
+                cascade_graph.nodes[downstream_dam_id].get("name")
+            )
+
+            edge_tooltip = (
+                f"{upstream_name} → {downstream_name}: {distance_text}"
+            )
+
+            folium.PolyLine(
+                locations=[
+                    upstream_coordinate,
+                    downstream_coordinate,
+                ],
+                color="#1f5aa6",
+                weight=3,
+                opacity=0.8,
+                tooltip=edge_tooltip,
+            ).add_to(cascade_map)
+
+            # Draw one directional arrow at the midpoint of the direct edge.
+            # The line is ordered upstream -> downstream, so the bearing is
+            # calculated from upstream_coordinate to downstream_coordinate.
+            midpoint = [
+                (upstream_coordinate[0] + downstream_coordinate[0]) / 2,
+                (upstream_coordinate[1] + downstream_coordinate[1]) / 2,
+            ]
+
+            flow_bearing = bearing_degrees(
+                upstream_coordinate[0],
+                upstream_coordinate[1],
+                downstream_coordinate[0],
+                downstream_coordinate[1],
+            )
+
+            # &#9650; is a triangle that points north/up by default. Rotating
+            # by a compass bearing therefore makes it point toward the
+            # downstream dam:
+            #
+            # north = 0°, east = 90°, south = 180°, west = 270°.
+            arrow_html = (
+                '<div style="width:20px; height:20px; display:flex; '
+                'align-items:center; justify-content:center; '
+                f'transform: rotate({flow_bearing}deg); '
+                'transform-origin: center center;">'
+                '<span style="font-size:16px; color:#1f5aa6;">&#9650;</span>'
+                '</div>'
+            )
+
+            folium.Marker(
+                location=midpoint,
+                icon=folium.DivIcon(
+                    html=arrow_html,
+                    icon_size=(20, 20),
+                    icon_anchor=(10, 10),
+                ),
+                tooltip=edge_tooltip,
+            ).add_to(cascade_map)
+
+        # Add a compact legend to explain the graph-role colors.
+        legend_html = (
+            "<div style='position: fixed; bottom: 28px; left: 28px; "
+            "z-index: 9999; background-color: white; border: 1px solid gray; "
+            "border-radius: 4px; padding: 8px; font-size: 12px;'>"
+            "<strong>Cascade System Legend</strong><br>"
+            "<span style='color:green;'>&#9679;</span> Root dam<br>"
+            "<span style='color:red;'>&#9679;</span> Terminal dam<br>"
+            "<span style='color:blue;'>&#9679;</span> Intermediate hydroelectric dam<br>"
+            "<span style='color:gray;'>&#9679;</span> Intermediate non-hydroelectric dam"
+            "</div>"
+        )
+
+        cascade_map.get_root().html.add_child(
+            folium.Element(legend_html)
+        )
+
+        self.cascade_maps_directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        if os.name != "nt":
+            os.chmod(self.cascade_maps_directory, 0o700)
+
+        # System IDs originate from normalized NID IDs. Replace unexpected
+        # filename characters defensively before constructing the output path.
+        safe_system_id = re.sub(
+            r"[^A-Za-z0-9_.-]+",
+            "_",
+            system_id,
+        )
+
+        output_file = (
+            self.cascade_maps_directory
+            / f"cascade_{safe_system_id}.html"
+        )
+
+        # Folium writes the full HTML document. The file is local application
+        # output, not downloaded/rendered inside Tkinter.
+        cascade_map.save(str(output_file))
+
+        self.cascade_query_status_text.set(
+            f"Saved and opened interactive map for system {system_id}."
+        )
+
+        self._append_log(
+            f"Part 6 map saved for cascade system {system_id}: {output_file}"
+        )
+
+        if skipped_edge_count:
+            self._append_log(
+                f"Map note: {skipped_edge_count:,} edge(s) were not drawn "
+                "because one or both endpoint dams lacked valid coordinates."
+            )
+
+        try:
+            # as_uri() creates a valid escaped file:// URL and avoids browser
+            # issues with spaces or non-ASCII characters in the cache path.
+            webbrowser.open_new_tab(output_file.resolve().as_uri())
+        except Exception as error:
+            # The map is still successfully saved even if the operating system
+            # cannot launch a configured browser.
+            self._append_log(
+                f"Map saved, but the browser could not be opened automatically: {error}"
+            )
+
+            messagebox.showinfo(
+                APP_NAME,
+                "The interactive map was saved successfully, but could not be "
+                "opened automatically.\n\n"
+                f"Open this file manually:\n{output_file}",
+            )
+
+    def generate_query_results_conus_map(self) -> None:
+        """
+        Generate a single interactive CONUS overview map for the cascade
+        systems returned by the latest Part 6 query.
+
+        Each cascade system is represented as an independently toggleable
+        Folium FeatureGroup. Flow lines use system-specific colors, while dam
+        marker colors communicate a dam's role within its own cascade graph:
+
+        - green: root dam;
+        - red: terminal dam;
+        - blue: intermediate hydroelectric dam;
+        - gray: intermediate non-hydroelectric dam.
+
+        The map uses straight geographic lines as a connectivity visualization;
+        the Part 4 river-mile value remains the authoritative route distance.
+        """
+
+        # A query must run at least once so the map precisely reflects the
+        # filters and matching systems currently presented to the researcher.
+        if not self.last_cascade_query_system_ids:
+            messagebox.showwarning(
+                APP_NAME,
+                "No cascade systems are in the current query result. "
+                "Run a Part 6 query first, or use Clear Filters / Show All Systems.",
+            )
+            return
+
+        # Retrieve only graphs that still exist. This defensive check handles
+        # a future Part 5 rebuild that replaces the in-memory graph set after
+        # a query list was previously generated.
+        selected_graphs = {
+            system_id: self.cascade_graphs[system_id]
+            for system_id in self.last_cascade_query_system_ids
+            if system_id in self.cascade_graphs
+        }
+
+        if not selected_graphs:
+            messagebox.showwarning(
+                APP_NAME,
+                "The systems from the prior query are no longer available. "
+                "Run the query again after rebuilding cascade systems.",
+            )
+            return
+
+        # Validate coordinates once before determining map center or drawing
+        # content. Invalid records do not prevent valid systems from mapping.
+        coordinates_by_system: dict[
+            str,
+            dict[str, tuple[float, float]],
+        ] = {}
+
+        all_latitudes: list[float] = []
+        all_longitudes: list[float] = []
+
+        for system_id, cascade_graph in selected_graphs.items():
+            system_coordinates: dict[str, tuple[float, float]] = {}
+
+            for dam_id, attributes in cascade_graph.nodes(data=True):
+                latitude = self._get_valid_map_coordinate(
+                    attributes.get("Latitude"),
+                    -90.0,
+                    90.0,
+                )
+                longitude = self._get_valid_map_coordinate(
+                    attributes.get("Longitude"),
+                    -180.0,
+                    180.0,
+                )
+
+                if latitude is None or longitude is None:
+                    continue
+
+                system_coordinates[str(dam_id)] = (
+                    latitude,
+                    longitude,
+                )
+                all_latitudes.append(latitude)
+                all_longitudes.append(longitude)
+
+            coordinates_by_system[system_id] = system_coordinates
+
+        if not all_latitudes or not all_longitudes:
+            messagebox.showerror(
+                APP_NAME,
+                "No valid dam coordinates were available in the query results.",
+            )
+            return
+
+        # Preserve the original CONUS-map centering logic.
+        map_center = [
+            (min(all_latitudes) + max(all_latitudes)) / 2,
+            (min(all_longitudes) + max(all_longitudes)) / 2,
+        ]
+
+        cascade_map = folium.Map(
+            location=map_center,
+            zoom_start=5,
+            tiles="CartoDB positron",
+            control_scale=True,
+        )
+
+        line_color_cycle = itertools.cycle(CASCADE_LINE_COLORS)
+        skipped_edge_count = 0
+        skipped_node_count = 0
+
+        for system_id in sorted(selected_graphs):
+            cascade_graph = selected_graphs[system_id]
+            line_color = next(line_color_cycle)
+            coordinates = coordinates_by_system[system_id]
+
+            root_dams = {
+                str(dam_id)
+                for dam_id in cascade_graph.nodes
+                if cascade_graph.in_degree(dam_id) == 0
+            }
+            terminal_dams = {
+                str(dam_id)
+                for dam_id in cascade_graph.nodes
+                if cascade_graph.out_degree(dam_id) == 0
+            }
+
+            root_names = ", ".join(
+                self._display_value(
+                    cascade_graph.nodes[dam_id].get("name")
+                )
+                for dam_id in sorted(root_dams)
+                if dam_id in cascade_graph.nodes
+            )
+
+            # Each cascade is a separate toggleable map layer.
+            feature_group = folium.FeatureGroup(
+                name=f"{root_names} ({system_id})",
+                show=True,
+            )
+
+            # --------------------------------------------------------------
+            # Dam markers
+            # --------------------------------------------------------------
+            for dam_id, attributes in cascade_graph.nodes(data=True):
+                normalized_dam_id = str(dam_id)
+                coordinate = coordinates.get(normalized_dam_id)
+
+                if coordinate is None:
+                    skipped_node_count += 1
+                    continue
+
+                if normalized_dam_id in root_dams:
+                    marker_color = "green"
+                    role_label = "Root dam"
+                elif normalized_dam_id in terminal_dams:
+                    marker_color = "red"
+                    role_label = "Terminal dam"
+                elif bool(attributes.get("is_hydroelectric", False)):
+                    marker_color = "blue"
+                    role_label = "Intermediate hydroelectric dam"
+                else:
+                    marker_color = "gray"
+                    role_label = "Intermediate non-hydroelectric dam"
+
+                dam_name = self._display_value(attributes.get("name"))
+                dam_owner = self._display_value(attributes.get("owner"))
+                dam_purposes = self._display_value(
+                    attributes.get("purposes")
+                )
+                hydroelectric_label = (
+                    "Hydroelectric"
+                    if bool(attributes.get("is_hydroelectric", False))
+                    else "Non-hydroelectric"
+                )
+
+                # Escape every externally sourced NID field before inserting it
+                # into popup HTML. This prevents stored dam text from becoming
+                # executable HTML/JavaScript in the exported Folium page.
+                popup_html = (
+                    "<div style='min-width:260px;'>"
+                    f"<strong>{html.escape(dam_name)}</strong><br>"
+                    f"<strong>NID ID:</strong> "
+                    f"{html.escape(normalized_dam_id)}<br>"
+                    f"<strong>System:</strong> "
+                    f"{html.escape(system_id)}<br>"
+                    f"<strong>Role:</strong> "
+                    f"{html.escape(role_label)}<br>"
+                    f"<strong>Type:</strong> "
+                    f"{html.escape(hydroelectric_label)}<br>"
+                    f"<strong>Owner:</strong> "
+                    f"{html.escape(dam_owner)}<br>"
+                    f"<strong>Purposes:</strong> "
+                    f"{html.escape(dam_purposes)}"
+                    "</div>"
+                )
+
+                # CircleMarker is intentionally lightweight for national-scale
+                # maps that may contain many cascade systems and dam markers.
+                folium.CircleMarker(
+                    location=coordinate,
+                    radius=5,
+                    color=marker_color,
+                    fill=True,
+                    fill_color=marker_color,
+                    fill_opacity=0.9,
+                    weight=1,
+                    popup=folium.Popup(
+                        popup_html,
+                        max_width=350,
+                    ),
+                    tooltip=(
+                        f"{dam_name} "
+                        f"({hydroelectric_label}; {role_label})"
+                    ),
+                ).add_to(feature_group)
+
+            # --------------------------------------------------------------
+            # Direct downstream edges and midpoint directional arrows
+            # --------------------------------------------------------------
+            for upstream_dam_id, downstream_dam_id, edge_attributes in (
+                cascade_graph.edges(data=True)
+            ):
+                upstream_id = str(upstream_dam_id)
+                downstream_id = str(downstream_dam_id)
+
+                upstream_coordinate = coordinates.get(upstream_id)
+                downstream_coordinate = coordinates.get(downstream_id)
+
+                if (
+                    upstream_coordinate is None
+                    or downstream_coordinate is None
+                ):
+                    skipped_edge_count += 1
+                    continue
+
+                raw_distance = edge_attributes.get("distance_miles")
+
+                try:
+                    distance_label = (
+                        f"{float(raw_distance):.2f} river miles"
+                        if raw_distance is not None
+                        else "distance unavailable"
+                    )
+                except (TypeError, ValueError):
+                    distance_label = "distance unavailable"
+
+                upstream_name = self._display_value(
+                    cascade_graph.nodes[upstream_dam_id].get("name")
+                )
+                downstream_name = self._display_value(
+                    cascade_graph.nodes[downstream_dam_id].get("name")
+                )
+
+                edge_tooltip = (
+                    f"{upstream_name} → {downstream_name}: {distance_label}"
+                )
+
+                folium.PolyLine(
+                    locations=[
+                        upstream_coordinate,
+                        downstream_coordinate,
+                    ],
+                    color=line_color,
+                    weight=2,
+                    opacity=0.7,
+                    tooltip=edge_tooltip,
+                ).add_to(feature_group)
+
+                # Calculate the geographic midpoint and rotate an upward
+                # triangle according to the upstream-to-downstream bearing.
+                # This is the same valid arrow implementation used in the
+                # corrected selected-system map.
+                midpoint = [
+                    (
+                        upstream_coordinate[0]
+                        + downstream_coordinate[0]
+                    ) / 2,
+                    (
+                        upstream_coordinate[1]
+                        + downstream_coordinate[1]
+                    ) / 2,
+                ]
+
+                flow_bearing = bearing_degrees(
+                    upstream_coordinate[0],
+                    upstream_coordinate[1],
+                    downstream_coordinate[0],
+                    downstream_coordinate[1],
+                )
+
+                arrow_html = (
+                    '<div style="width:20px; height:20px; display:flex; '
+                    'align-items:center; justify-content:center; '
+                    f'transform: rotate({flow_bearing}deg); '
+                    'transform-origin: center center;">'
+                    f'<span style="font-size:16px; color:{line_color};">'
+                    '&#9650;</span>'
+                    '</div>'
+                )
+
+                folium.Marker(
+                    location=midpoint,
+                    icon=folium.DivIcon(
+                        html=arrow_html,
+                        icon_size=(20, 20),
+                        icon_anchor=(10, 10),
+                    ),
+                    tooltip=edge_tooltip,
+                ).add_to(feature_group)
+
+                if self.show_overview_distance_labels_var.get():
+                    folium.Marker(
+                        location=midpoint,
+                        icon=folium.DivIcon(
+                            html=(
+                                '<div style="font-size:9pt; color:black; '
+                                "background-color:white; padding:1px; "
+                                "border:1px solid gray; border-radius:3px; "
+                                f'margin-top:14px;">'
+                                f"{html.escape(distance_label)}"
+                                "</div>"
+                            ),
+                            icon_size=(0, 0),
+                        ),
+                    ).add_to(feature_group)
+
+            feature_group.add_to(cascade_map)
+
+        # Give the user a layer selector to isolate any cascade system.
+        folium.LayerControl(collapsed=True).add_to(cascade_map)
+
+        legend_html = (
+            "<div style='position:fixed; bottom:28px; left:28px; "
+            "z-index:9999; background-color:white; border:1px solid gray; "
+            "border-radius:4px; padding:8px; font-size:12px;'>"
+            "<strong>Cascade System Legend</strong><br>"
+            "<span style='color:green;'>&#9679;</span> Root dam<br>"
+            "<span style='color:red;'>&#9679;</span> Terminal dam<br>"
+            "<span style='color:blue;'>&#9679;</span> "
+            "Intermediate hydroelectric dam<br>"
+            "<span style='color:gray;'>&#9679;</span> "
+            "Intermediate non-hydroelectric dam"
+            "</div>"
+        )
+
+        cascade_map.get_root().html.add_child(
+            folium.Element(legend_html)
+        )
+
+        self.cascade_maps_directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        if os.name != "nt":
+            os.chmod(self.cascade_maps_directory, 0o700)
+
+        output_file = (
+            self.cascade_maps_directory
+            / CONUS_CASCADE_MAP_FILENAME
+        )
+
+        # This is trusted, locally generated output. The source values within
+        # popups/labels are escaped above before they enter the Folium document.
+        cascade_map.save(str(output_file))
+
+        self.cascade_query_status_text.set(
+            f"Saved CONUS overview map for {len(selected_graphs):,} "
+            "query-matching cascade system(s)."
+        )
+
+        self._append_log(
+            "Part 6 CONUS overview map saved for "
+            f"{len(selected_graphs):,} query-matching system(s): {output_file}"
+        )
+
+        if skipped_node_count:
+            self._append_log(
+                f"CONUS map note: {skipped_node_count:,} dam marker(s) were "
+                "not drawn because coordinates were unavailable or invalid."
+            )
+
+        if skipped_edge_count:
+            self._append_log(
+                f"CONUS map note: {skipped_edge_count:,} edge(s) were not "
+                "drawn because one or both endpoint coordinates were unavailable."
+            )
+
+        try:
+            # Use a valid file URI so paths with spaces or non-ASCII characters
+            # open reliably in the system-configured browser.
+            webbrowser.open_new_tab(output_file.resolve().as_uri())
+        except Exception as error:
+            self._append_log(
+                "CONUS map was saved, but could not be opened automatically: "
+                f"{error}"
+            )
+
+            messagebox.showinfo(
+                APP_NAME,
+                "The CONUS overview map was saved successfully, but could "
+                "not be opened automatically.\n\n"
+                f"Open this file manually:\n{output_file}",
+            )
+
     def _append_log(self, message: str) -> None:
         """Append timestamped text to the UI log from the Tkinter main thread."""
 
@@ -2535,6 +5447,14 @@ class CascadeResearchApp(tk.Tk):
                     self.downstream_links = payload["dataframe"]
                     self.downstream_links_csv_path = payload["output_file"]
 
+                    # Downstream links are now available. Part 5 additionally
+                    # checks that Part 3 filtering has been run before it
+                    # permits cascade construction.
+                    self.notebook.tab(
+                        self.cascade_builder_tab,
+                        state="normal",
+                    )
+
                     total_dams = payload["total_dams"]
                     linked_dams = payload["linked_dams"]
                     maximum_distance = payload["maximum_distance"]
@@ -2634,6 +5554,157 @@ class CascadeResearchApp(tk.Tk):
                         "The downstream dam search did not complete.\n\n"
                         f"Details: {payload}",
                     )
+                elif message_type == "cascade_construction_success":
+                    self.cascade_graphs = payload["cascade_graphs"]
+                    self.cascade_systems_edges = payload["edge_dataframe"]
+                    self.cascade_systems_summary = payload["summary_dataframe"]
+                    self.cascade_systems_csv_path = payload["edge_csv_path"]
+                    self.cascade_systems_summary_csv_path = payload[
+                        "summary_csv_path"
+                    ]
+
+                    # Part 6 uses the in-memory graphs produced by Part 5.
+                    # It remains available even when the current criteria
+                    # produce zero systems, so it can report that condition.
+                    self.notebook.tab(
+                        self.cascade_query_tab,
+                        state="normal",
+                    )
+
+                    self.refresh_cascade_system_list()
+                    
+                    self.cascade_systems_csv_path_text.set(
+                        str(self.cascade_systems_csv_path)
+                    )
+                    self.cascade_summary_csv_path_text.set(
+                        str(self.cascade_systems_summary_csv_path)
+                    )
+
+                    self.construct_cascades_button.configure(state=tk.NORMAL)
+
+                    system_count = payload["system_count"]
+                    edge_count = payload["edge_count"]
+
+                    self.cascade_construction_status_text.set(
+                        f"Complete: {system_count:,} cascade system(s) constructed."
+                    )
+
+                    self._display_cascade_results(
+                        [
+                            (
+                                "Part 3 matched root candidates",
+                                f"{payload['root_candidate_count']:,}",
+                            ),
+                            (
+                                "Root candidates covered by another candidate chain",
+                                f"{payload['covered_candidate_count']:,}",
+                            ),
+                            (
+                                "True upstream root candidates",
+                                f"{payload['true_root_count']:,}",
+                            ),
+                            (
+                                "Initial chains containing at least two dams",
+                                f"{payload['two_dam_chain_count']:,}",
+                            ),
+                            (
+                                "Minimum hydroelectric dams per system",
+                                f"{payload['minimum_hydroelectric_dams']:,}",
+                            ),
+                            (
+                                "Same-owner continuation required",
+                                str(payload["require_same_owner"]),
+                            ),
+                            (
+                                "Qualifying initial cascade chains",
+                                f"{payload['qualifying_chain_count']:,}",
+                            ),
+                            (
+                                "Final connected cascade systems",
+                                f"{system_count:,}",
+                            ),
+                            (
+                                "Systems with multiple converging roots",
+                                f"{payload['multi_root_system_count']:,}",
+                            ),
+                            (
+                                "Direct downstream edges exported",
+                                f"{edge_count:,}",
+                            ),
+                            (
+                                "Cycle warnings encountered",
+                                f"{payload['cycle_count']:,}",
+                            ),
+                        ]
+                    )
+
+                    self._append_log("")
+                    self._append_log("=" * 60)
+                    self._append_log(
+                        "Part 5 — Cascade-System Construction Complete"
+                    )
+                    self._append_log("=" * 60)
+                    self._append_log(
+                        f"Part 3 matched root candidates: "
+                        f"{payload['root_candidate_count']:,}"
+                    )
+                    self._append_log(
+                        f"True upstream root candidates: "
+                        f"{payload['true_root_count']:,}"
+                    )
+                    self._append_log(
+                        f"Initial chains with at least two dams: "
+                        f"{payload['two_dam_chain_count']:,}"
+                    )
+                    self._append_log(
+                        f"Minimum hydroelectric dams per system: "
+                        f"{payload['minimum_hydroelectric_dams']:,}"
+                    )
+                    self._append_log(
+                        f"Same-owner continuation requirement: "
+                        f"{payload['require_same_owner']}"
+                    )
+                    self._append_log(
+                        f"Final cascade systems: {system_count:,}"
+                    )
+                    self._append_log(
+                        f"Direct downstream edges exported: {edge_count:,}"
+                    )
+                    self._append_log(
+                        f"System edge-list CSV: {self.cascade_systems_csv_path}"
+                    )
+                    self._append_log(
+                        f"System summary CSV: "
+                        f"{self.cascade_systems_summary_csv_path}"
+                    )
+
+                    if payload["cycle_count"]:
+                        self._append_log(
+                            "Warning: one or more cyclic downstream-link paths "
+                            "were detected and safely terminated."
+                        )
+
+                    self._append_log(
+                        "Cascade graphs are available in memory for the future "
+                        "Part 6 query and visualization tools."
+                    )
+                    self._append_log("")
+
+                elif message_type == "cascade_construction_failure":
+                    self.construct_cascades_button.configure(state=tk.NORMAL)
+                    self.cascade_construction_status_text.set(
+                        "Cascade construction failed."
+                    )
+
+                    self._append_log(
+                        f"Part 5 cascade-system construction failed: {payload}"
+                    )
+
+                    messagebox.showerror(
+                        APP_NAME,
+                        "Cascade-system construction did not complete.\n\n"
+                        f"Details: {payload}",
+                    )
 
                 elif message_type == "failure":
                     self.status_text.set("Initialization failed.")
@@ -2695,13 +5766,11 @@ class CascadeResearchApp(tk.Tk):
 
         self.destroy()
 
-
 def main() -> None:
     """Start the application."""
 
     application = CascadeResearchApp()
     application.mainloop()
-
 
 if __name__ == "__main__":
     main()
