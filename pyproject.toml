@@ -11,6 +11,9 @@ description = "Tkinter research application for identifying and visualizing dam 
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    # Configured to resolve online connectivity issues.
+    "aiohttp>=3.9,<4",
+
     # Tabular data loading, filtering, joining, and CSV export.
     "pandas>=2.2.0",
 

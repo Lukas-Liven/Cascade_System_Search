@@ -44,7 +44,8 @@ from typing import Any, Callable, Optional
 import pandas as pd
 import requests
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
+from datetime import datetime, timezone
 import html
 import webbrowser
 import aiohttp
@@ -138,6 +139,17 @@ DEFAULT_CASCADE_SUMMARY_EXPORT_NAME = "cascading_systems_summary.csv"
 # Increment this whenever the structure of a saved artifact changes in an
 # incompatible way.
 WORKFLOW_ARTIFACT_SCHEMA_VERSION = 1
+# ---------------------------------------------------------------------------
+# Named case-study persistence
+# ---------------------------------------------------------------------------
+
+# Each named case study is a private, application-managed pickle artifact.
+# Users select studies by name in the UI; they never browse to arbitrary
+# pickle files, because pickle must never be loaded from untrusted locations.
+CASE_STUDIES_DIRECTORY_NAME = "case_studies"
+CASE_STUDY_FILE_SUFFIX = ".study.pkl"
+CASE_STUDY_ARTIFACT_TYPE = "cascade_case_study"
+CASE_STUDY_SCHEMA_VERSION = 1
 # ---------------------------------------------------------------------------
 # Data structures and exceptions
 # ---------------------------------------------------------------------------
@@ -332,7 +344,104 @@ def load_application_artifact(
         )
 
     return payload
+def normalize_study_name(study_name: str) -> str:
+    """
+    Normalize and validate a user-provided study name.
 
+    Study names are used only to create files inside the private
+    case_studies directory. Path separators and traversal characters are
+    prohibited so a name cannot escape that directory.
+    """
+
+    normalized_name = re.sub(
+        r"\s+",
+        " ",
+        study_name.strip(),
+    )
+
+    if not normalized_name:
+        raise ValueError("A case study name is required.")
+
+    if len(normalized_name) > 80:
+        raise ValueError(
+            "A case study name must contain 80 characters or fewer."
+        )
+
+    if any(
+        character in normalized_name
+        for character in ("/", "\\", "\0")
+    ):
+        raise ValueError(
+            "A case study name cannot contain path separators."
+        )
+
+    return normalized_name
+
+
+def study_name_to_filename(study_name: str) -> str:
+    """
+    Convert a validated display name into a safe deterministic filename.
+
+    The original display name remains in the pickle payload. This filename is
+    only a private cache implementation detail.
+    """
+
+    safe_name = re.sub(
+        r"[^A-Za-z0-9_. -]+",
+        "_",
+        study_name,
+    ).strip(" .")
+
+    if not safe_name:
+        safe_name = "unnamed_study"
+
+    return f"{safe_name}{CASE_STUDY_FILE_SUFFIX}"
+
+
+def compute_initialization_fingerprint(
+    initialization_result: InitializationResult,
+) -> str:
+    """
+    Create a lightweight fingerprint of the initialized dam/network context.
+
+    The fingerprint is not a cryptographic authentication mechanism. It is a
+    compatibility indicator used to warn the researcher if they attempt to
+    restore a study against a changed NID/NHD matching context.
+    """
+
+    matched_dams = (
+        initialization_result.dam_inventory_matched[
+            ["NID ID", "node_id"]
+        ]
+        .copy()
+        .drop_duplicates(subset=["NID ID"], keep="first")
+    )
+
+    matched_dams["NID ID"] = matched_dams["NID ID"].map(
+        normalize_identifier
+    )
+    matched_dams["node_id"] = matched_dams["node_id"].map(str)
+
+    matched_dams = matched_dams.dropna(
+        subset=["NID ID", "node_id"]
+    ).sort_values(
+        ["NID ID", "node_id"],
+        kind="stable",
+    )
+
+    fingerprint_source = {
+        "graph_nodes": initialization_result.graph.number_of_nodes(),
+        "graph_edges": initialization_result.graph.number_of_edges(),
+        "matched_dams": matched_dams.to_dict(orient="records"),
+    }
+
+    serialized_source = json.dumps(
+        fingerprint_source,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    return hashlib.sha256(serialized_source).hexdigest()
 
 def export_dataframe_to_csv(
     dataframe: pd.DataFrame,
@@ -1200,6 +1309,28 @@ class CascadeResearchApp(tk.Tk):
         self.geometry("1040x720")
 
         self.cache_dir = get_application_cache_directory()
+        # Named case studies are isolated from shared NHD, GeoConnex, NID,
+        # ResNet, and workflow-cache artifacts. A case study stores the
+        # researcher's selections and derived Part 3–6 results.
+        self.case_studies_directory = (
+            self.cache_dir / CASE_STUDIES_DIRECTORY_NAME
+        )
+        self.case_studies_directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        if os.name != "nt":
+            os.chmod(self.case_studies_directory, 0o700)
+
+        self.current_study_name: Optional[str] = None
+        self.current_study_file: Optional[Path] = None
+        self.current_initialization_fingerprint: Optional[str] = None
+
+        self.study_name_text = tk.StringVar(
+            value="No case study selected"
+        )
+        self.study_selector_text = tk.StringVar()
         # Application-managed workflow artifacts. These files are the
         # persistent equivalents of the in-memory Part 4 and Part 5 results.
         # They are not user-editable workflow inputs.
@@ -1299,6 +1430,71 @@ class CascadeResearchApp(tk.Tk):
             ),
             wraplength=980,
         ).pack(anchor=tk.W, pady=(4, 12))
+
+        # ------------------------------------------------------------------
+        # Named case-study management
+        # ------------------------------------------------------------------
+        study_frame = ttk.LabelFrame(
+            root,
+            text="Case Study",
+            padding=8,
+        )
+        study_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(
+            study_frame,
+            text="Current study:",
+        ).pack(side=tk.LEFT)
+
+        ttk.Label(
+            study_frame,
+            textvariable=self.study_name_text,
+            foreground="#1f4e79",
+        ).pack(side=tk.LEFT, padx=(6, 14))
+
+        self.new_study_button = ttk.Button(
+            study_frame,
+            text="New Study",
+            command=self.create_new_study,
+        )
+        self.new_study_button.pack(side=tk.LEFT)
+
+        self.save_study_button = ttk.Button(
+            study_frame,
+            text="Save Current Study",
+            command=self.save_current_study,
+            state=tk.DISABLED,
+        )
+        self.save_study_button.pack(side=tk.LEFT, padx=(8, 0))
+
+        ttk.Label(
+            study_frame,
+            text="Load:",
+        ).pack(side=tk.LEFT, padx=(18, 6))
+
+        self.study_selector_combobox = ttk.Combobox(
+            study_frame,
+            textvariable=self.study_selector_text,
+            width=28,
+            state="readonly",
+        )
+        self.study_selector_combobox.pack(side=tk.LEFT)
+
+        self.load_study_button = ttk.Button(
+            study_frame,
+            text="Load Selected Study",
+            command=self.load_selected_study,
+        )
+        self.load_study_button.pack(side=tk.LEFT, padx=(8, 0))
+
+        self.refresh_study_list_button = ttk.Button(
+            study_frame,
+            text="Refresh",
+            command=self.refresh_case_study_list,
+        )
+        self.refresh_study_list_button.pack(side=tk.LEFT, padx=(8, 0))
+
+        self.refresh_case_study_list()
 
         # A vertical PanedWindow lets the user drag the horizontal separator
         # between the workflow tabs and the shared application log. This makes
@@ -2668,6 +2864,738 @@ class CascadeResearchApp(tk.Tk):
         # Disabled controls cannot accidentally participate in a query until
         # their associated checkbox is selected.
         self._update_cascade_query_control_states()
+
+    def _get_case_study_file(self, study_name: str) -> Path:
+        """
+        Return the private cache path for one validated study name.
+
+        resolve() plus the parent-directory check prevents path traversal even
+        if a malformed value reaches this method unexpectedly.
+        """
+
+        validated_name = normalize_study_name(study_name)
+
+        candidate_file = (
+            self.case_studies_directory
+            / study_name_to_filename(validated_name)
+        ).resolve()
+
+        expected_directory = self.case_studies_directory.resolve()
+
+        if candidate_file.parent != expected_directory:
+            raise ValueError(
+                "Invalid case-study file location."
+            )
+
+        return candidate_file
+
+
+    def refresh_case_study_list(self) -> None:
+        """
+        Refresh the private case-study selector from application-owned files.
+
+        The application intentionally lists only files in its controlled
+        case_studies directory. It does not load user-selected pickle files.
+        """
+
+        study_names: list[str] = []
+
+        for study_file in sorted(
+            self.case_studies_directory.glob(
+                f"*{CASE_STUDY_FILE_SUFFIX}"
+            )
+        ):
+            try:
+                payload = load_application_artifact(
+                    artifact_file=study_file,
+                    expected_artifact_type=CASE_STUDY_ARTIFACT_TYPE,
+                )
+
+                study_name = payload.get("study_name")
+
+                if isinstance(study_name, str) and study_name.strip():
+                    study_names.append(study_name.strip())
+
+            except Exception as error:
+                # A damaged or obsolete artifact should not prevent the rest
+                # of the study list from being used.
+                self._append_log(
+                    f"Skipped unreadable case-study artifact "
+                    f"'{study_file.name}': {error}"
+                )
+
+        study_names = sorted(set(study_names), key=str.casefold)
+
+        self.study_selector_combobox.configure(
+            values=study_names
+        )
+
+        if (
+            self.current_study_name is not None
+            and self.current_study_name in study_names
+        ):
+            self.study_selector_text.set(
+                self.current_study_name
+            )
+        elif study_names:
+            self.study_selector_text.set(study_names[0])
+        else:
+            self.study_selector_text.set("")
+
+
+    def create_new_study(self) -> None:
+        """
+        Create a new named study and reset derived Parts 3–6 state.
+
+        Part 1 initialization remains available because NHD/NID source data
+        are shared application caches rather than study-specific data.
+        """
+
+        study_name = simpledialog.askstring(
+            APP_NAME,
+            "Enter a name for the new case study:",
+            parent=self,
+        )
+
+        if study_name is None:
+            return
+
+        try:
+            study_name = normalize_study_name(study_name)
+            study_file = self._get_case_study_file(study_name)
+        except ValueError as error:
+            messagebox.showwarning(APP_NAME, str(error))
+            return
+
+        if study_file.exists():
+            replace_existing = messagebox.askyesno(
+                APP_NAME,
+                f"A case study named '{study_name}' already exists.\n\n"
+                "Create a new blank version and overwrite it when saved?",
+            )
+
+            if not replace_existing:
+                return
+
+        self.current_study_name = study_name
+        self.current_study_file = study_file
+        self.study_name_text.set(study_name)
+        self.study_selector_text.set(study_name)
+
+        self._reset_study_derived_state()
+
+        # A study can be named before initialization, but it cannot be saved
+        # until an initialized baseline exists.
+        self.save_study_button.configure(
+            state=(
+                tk.NORMAL
+                if self.initialization_result is not None
+                else tk.DISABLED
+            )
+        )
+
+        self._append_log(
+            f"Created new case study: {study_name}"
+        )
+
+        self.refresh_case_study_list()
+
+
+    def _reset_study_derived_state(self) -> None:
+        """
+        Reset all researcher-specific Part 3–6 state.
+
+        This does not delete existing application cache artifacts or other
+        named studies. It only starts the current in-memory study fresh.
+        """
+
+        self.filtered_dam_inventory = None
+        self.filtered_dam_inventory_matched = None
+
+        self.downstream_links = None
+        self.downstream_links_cache_file = None
+
+        self.cascade_graphs = {}
+        self.cascade_systems_edges = None
+        self.cascade_systems_summary = None
+        self.cascade_systems_cache_file = None
+
+        self.last_cascade_query_system_ids = []
+
+        # Restore Part 3 defaults.
+        if hasattr(self, "minimum_storage_text"):
+            self.minimum_storage_text.set("100")
+
+        if hasattr(self, "hydroelectric_only_var"):
+            self.hydroelectric_only_var.set(True)
+
+        if hasattr(self, "power_threshold_text"):
+            self.power_threshold_text.set("10")
+
+        if hasattr(self, "_update_power_filter_state"):
+            self._update_power_filter_state()
+
+        # Restore Part 5 defaults.
+        if hasattr(self, "minimum_hydroelectric_dams_text"):
+            self.minimum_hydroelectric_dams_text.set(
+                str(DEFAULT_MIN_HYDROELECTRIC_DAMS_PER_CASCADE)
+            )
+
+        if hasattr(self, "require_same_owner_var"):
+            self.require_same_owner_var.set(
+                DEFAULT_REQUIRE_SAME_OWNER
+            )
+
+        # Clear Part 6 query controls.
+        if hasattr(self, "query_state_enabled_var"):
+            self.query_state_enabled_var.set(False)
+            self.query_state_text.set("")
+
+        if hasattr(self, "query_nid_enabled_var"):
+            self.query_nid_enabled_var.set(False)
+            self.query_nid_text.set("")
+
+        if hasattr(self, "query_river_enabled_var"):
+            self.query_river_enabled_var.set(False)
+            self.query_river_text.set("")
+
+        if hasattr(self, "_update_cascade_query_control_states"):
+            self._update_cascade_query_control_states()
+
+        # Reset UI states that depend on generated Part 4/5 data.
+        if hasattr(self, "export_downstream_links_button"):
+            self.export_downstream_links_button.configure(
+                state=tk.DISABLED
+            )
+
+        if hasattr(self, "export_cascade_edges_button"):
+            self.export_cascade_edges_button.configure(
+                state=tk.DISABLED
+            )
+
+        if hasattr(self, "export_cascade_summary_button"):
+            self.export_cascade_summary_button.configure(
+                state=tk.DISABLED
+            )
+
+        if hasattr(self, "notebook"):
+            self.notebook.tab(
+                self.cascade_builder_tab,
+                state="disabled",
+            )
+            self.notebook.tab(
+                self.cascade_query_tab,
+                state="disabled",
+            )
+
+        if hasattr(self, "downstream_csv_path_text"):
+            self.downstream_csv_path_text.set(
+                "No downstream-link reference has been created for this study."
+            )
+
+        if hasattr(self, "cascade_systems_csv_path_text"):
+            self.cascade_systems_csv_path_text.set(
+                "No cascade artifact has been created for this study."
+            )
+
+        if hasattr(self, "cascade_summary_csv_path_text"):
+            self.cascade_summary_csv_path_text.set(
+                "No cascade summary has been created for this study."
+            )
+
+        if hasattr(self, "cascade_system_combobox"):
+            self.cascade_system_combobox.configure(values=[])
+
+        if hasattr(self, "selected_system_id_text"):
+            self.selected_system_id_text.set("")
+
+        if hasattr(self, "_display_cascade_query_matches"):
+            self._display_cascade_query_matches([])
+
+
+    def _build_case_study_payload(self) -> dict[str, Any]:
+        """
+        Build the complete serializable state for the active case study.
+
+        The NHD graph and complete base NID inventory are deliberately omitted.
+        Those are common application caches restored through Part 1. The study
+        stores only researcher-specific workflow state and derived outputs.
+        """
+
+        if self.initialization_result is None:
+            raise RuntimeError(
+                "Part 1 initialization is required before saving a study."
+            )
+
+        if self.current_study_name is None:
+            raise RuntimeError(
+                "Create or load a named case study before saving."
+            )
+
+        return {
+            "study_name": self.current_study_name,
+            "saved_utc": datetime.now(
+                timezone.utc
+            ).isoformat(),
+            "study_schema_version": CASE_STUDY_SCHEMA_VERSION,
+            "initialization_fingerprint": (
+                self.current_initialization_fingerprint
+            ),
+            "part_3": {
+                "minimum_storage": self.minimum_storage_text.get(),
+                "hydroelectric_only": (
+                    self.hydroelectric_only_var.get()
+                ),
+                "power_threshold": self.power_threshold_text.get(),
+                "filtered_dam_inventory": (
+                    self.filtered_dam_inventory.copy()
+                    if self.filtered_dam_inventory is not None
+                    else None
+                ),
+                "filtered_dam_inventory_matched": (
+                    self.filtered_dam_inventory_matched.copy()
+                    if self.filtered_dam_inventory_matched is not None
+                    else None
+                ),
+            },
+            "part_4": {
+                "maximum_distance_miles": (
+                    self.maximum_downstream_distance_text.get()
+                ),
+                "downstream_links": (
+                    self.downstream_links.copy()
+                    if self.downstream_links is not None
+                    else None
+                ),
+            },
+            "part_5": {
+                "minimum_hydroelectric_dams": (
+                    self.minimum_hydroelectric_dams_text.get()
+                ),
+                "require_same_owner": (
+                    self.require_same_owner_var.get()
+                ),
+                "cascade_graphs": self.cascade_graphs,
+                "cascade_systems_edges": (
+                    self.cascade_systems_edges.copy()
+                    if self.cascade_systems_edges is not None
+                    else None
+                ),
+                "cascade_systems_summary": (
+                    self.cascade_systems_summary.copy()
+                    if self.cascade_systems_summary is not None
+                    else None
+                ),
+            },
+            "part_6": {
+                "state_enabled": self.query_state_enabled_var.get(),
+                "state_value": self.query_state_text.get(),
+                "nid_enabled": self.query_nid_enabled_var.get(),
+                "nid_value": self.query_nid_text.get(),
+                "river_enabled": self.query_river_enabled_var.get(),
+                "river_value": self.query_river_text.get(),
+                "last_query_system_ids": (
+                    self.last_cascade_query_system_ids.copy()
+                ),
+            },
+        }
+
+
+    def save_current_study(self) -> None:
+        """
+        Save current Part 3–6 progress to the active named study artifact.
+        """
+
+        if self.current_study_name is None:
+            self.create_new_study()
+
+            if self.current_study_name is None:
+                return
+
+        if self.current_study_file is None:
+            try:
+                self.current_study_file = self._get_case_study_file(
+                    self.current_study_name
+                )
+            except ValueError as error:
+                messagebox.showerror(APP_NAME, str(error))
+                return
+
+        try:
+            payload = self._build_case_study_payload()
+
+            save_application_artifact(
+                artifact_file=self.current_study_file,
+                artifact_type=CASE_STUDY_ARTIFACT_TYPE,
+                payload=payload,
+            )
+
+            self._append_log(
+                f"Saved case study '{self.current_study_name}' to "
+                f"{self.current_study_file}"
+            )
+
+            self.refresh_case_study_list()
+
+        except Exception as error:
+            self._append_log(
+                f"Case-study save failed: {error}"
+            )
+
+            messagebox.showerror(
+                APP_NAME,
+                f"Could not save the current case study.\n\nDetails: {error}",
+            )
+
+
+    def load_selected_study(self) -> None:
+        """
+        Load the selected named study after Part 1 initialization.
+
+        Requiring initialization first ensures NHD/NID base data exist before
+        restored derived DataFrames and NetworkX graphs are used.
+        """
+
+        if self.initialization_result is None:
+            messagebox.showwarning(
+                APP_NAME,
+                "Initialize data in Part 1 before loading a case study.",
+            )
+            return
+
+        study_name = self.study_selector_text.get().strip()
+
+        if not study_name:
+            messagebox.showwarning(
+                APP_NAME,
+                "Select a case study to load.",
+            )
+            return
+
+        try:
+            study_file = self._get_case_study_file(study_name)
+
+            payload = load_application_artifact(
+                artifact_file=study_file,
+                expected_artifact_type=CASE_STUDY_ARTIFACT_TYPE,
+            )
+
+            self._restore_case_study_payload(
+                payload,
+                study_file,
+            )
+
+        except Exception as error:
+            self._append_log(
+                f"Case-study load failed for '{study_name}': {error}"
+            )
+
+            messagebox.showerror(
+                APP_NAME,
+                f"Could not load case study '{study_name}'.\n\n"
+                f"Details: {error}",
+            )
+
+
+    def _restore_case_study_payload(
+        self,
+        payload: dict[str, Any],
+        study_file: Path,
+    ) -> None:
+        """
+        Restore a validated named study into the current application session.
+        """
+
+        if payload.get("study_schema_version") != CASE_STUDY_SCHEMA_VERSION:
+            raise DataValidationError(
+                "This case study uses an unsupported schema version."
+            )
+
+        study_name = payload.get("study_name")
+
+        if not isinstance(study_name, str):
+            raise DataValidationError(
+                "The case study does not contain a valid study name."
+            )
+
+        study_name = normalize_study_name(study_name)
+
+        saved_fingerprint = payload.get(
+            "initialization_fingerprint"
+        )
+
+        if (
+            saved_fingerprint
+            and self.current_initialization_fingerprint
+            and saved_fingerprint
+            != self.current_initialization_fingerprint
+        ):
+            continue_load = messagebox.askyesno(
+                APP_NAME,
+                "The initialized NHD/NID data context differs from the "
+                "context used when this study was saved.\n\n"
+                "Loading may restore stale downstream links or cascade "
+                "systems. Continue anyway?",
+            )
+
+            if not continue_load:
+                return
+
+        part_3 = payload.get("part_3", {})
+        part_4 = payload.get("part_4", {})
+        part_5 = payload.get("part_5", {})
+        part_6 = payload.get("part_6", {})
+
+        if not isinstance(part_3, dict):
+            raise DataValidationError("Invalid Part 3 study data.")
+
+        if not isinstance(part_4, dict):
+            raise DataValidationError("Invalid Part 4 study data.")
+
+        if not isinstance(part_5, dict):
+            raise DataValidationError("Invalid Part 5 study data.")
+
+        if not isinstance(part_6, dict):
+            raise DataValidationError("Invalid Part 6 study data.")
+
+        # Reset existing researcher-specific results before restoring the
+        # selected study.
+        self._reset_study_derived_state()
+
+        # --------------------------------------------------------------
+        # Restore Part 3
+        # --------------------------------------------------------------
+        self.minimum_storage_text.set(
+            str(part_3.get("minimum_storage", "100"))
+        )
+        self.hydroelectric_only_var.set(
+            bool(part_3.get("hydroelectric_only", True))
+        )
+        self.power_threshold_text.set(
+            str(part_3.get("power_threshold", "10"))
+        )
+        self._update_power_filter_state()
+
+        filtered_inventory = part_3.get("filtered_dam_inventory")
+        filtered_inventory_matched = part_3.get(
+            "filtered_dam_inventory_matched"
+        )
+
+        if filtered_inventory is not None:
+            if not isinstance(filtered_inventory, pd.DataFrame):
+                raise DataValidationError(
+                    "Invalid filtered dam inventory in case study."
+                )
+
+            self.filtered_dam_inventory = filtered_inventory.copy()
+
+        if filtered_inventory_matched is not None:
+            if not isinstance(filtered_inventory_matched, pd.DataFrame):
+                raise DataValidationError(
+                    "Invalid matched filtered dam inventory in case study."
+                )
+
+            self.filtered_dam_inventory_matched = (
+                filtered_inventory_matched.copy()
+            )
+
+        # --------------------------------------------------------------
+        # Restore Part 4
+        # --------------------------------------------------------------
+        self.maximum_downstream_distance_text.set(
+            str(
+                part_4.get(
+                    "maximum_distance_miles",
+                    DEFAULT_MAX_DISTANCE_MILES,
+                )
+            )
+        )
+
+        downstream_links = part_4.get("downstream_links")
+
+        if downstream_links is not None:
+            if not isinstance(downstream_links, pd.DataFrame):
+                raise DataValidationError(
+                    "Invalid downstream-link data in case study."
+                )
+
+            self.downstream_links = downstream_links.copy()
+            self.downstream_links_cache_file = (
+                self.downstream_links_cache_path
+            )
+
+            self.export_downstream_links_button.configure(
+                state=tk.NORMAL
+            )
+
+            self.downstream_csv_path_text.set(
+                f"Restored from study: {study_file.name}"
+            )
+
+            self.notebook.tab(
+                self.cascade_builder_tab,
+                state="normal",
+            )
+
+        # --------------------------------------------------------------
+        # Restore Part 5
+        # --------------------------------------------------------------
+        self.minimum_hydroelectric_dams_text.set(
+            str(
+                part_5.get(
+                    "minimum_hydroelectric_dams",
+                    DEFAULT_MIN_HYDROELECTRIC_DAMS_PER_CASCADE,
+                )
+            )
+        )
+        self.require_same_owner_var.set(
+            bool(
+                part_5.get(
+                    "require_same_owner",
+                    DEFAULT_REQUIRE_SAME_OWNER,
+                )
+            )
+        )
+
+        cascade_graphs = part_5.get("cascade_graphs", {})
+
+        if not isinstance(cascade_graphs, dict):
+            raise DataValidationError(
+                "Invalid cascade graph data in case study."
+            )
+
+        for system_id, cascade_graph in cascade_graphs.items():
+            if not isinstance(system_id, str):
+                raise DataValidationError(
+                    "Cascade system IDs must be strings."
+                )
+
+            if not isinstance(cascade_graph, nx.DiGraph):
+                raise DataValidationError(
+                    "Invalid cascade graph structure in case study."
+                )
+
+        self.cascade_graphs = cascade_graphs
+
+        cascade_edges = part_5.get("cascade_systems_edges")
+        cascade_summary = part_5.get("cascade_systems_summary")
+
+        if cascade_edges is not None:
+            if not isinstance(cascade_edges, pd.DataFrame):
+                raise DataValidationError(
+                    "Invalid cascade edge-list data in case study."
+                )
+
+            self.cascade_systems_edges = cascade_edges.copy()
+
+        if cascade_summary is not None:
+            if not isinstance(cascade_summary, pd.DataFrame):
+                raise DataValidationError(
+                    "Invalid cascade summary data in case study."
+                )
+
+            self.cascade_systems_summary = cascade_summary.copy()
+
+        if self.cascade_graphs:
+            self.cascade_systems_cache_file = (
+                self.cascade_systems_cache_path
+            )
+
+            self.export_cascade_edges_button.configure(
+                state=tk.NORMAL
+            )
+            self.export_cascade_summary_button.configure(
+                state=tk.NORMAL
+            )
+
+            self.cascade_systems_csv_path_text.set(
+                f"Restored from study: {study_file.name}"
+            )
+            self.cascade_summary_csv_path_text.set(
+                "Optional CSV exports are available."
+            )
+
+            self.notebook.tab(
+                self.cascade_query_tab,
+                state="normal",
+            )
+
+        # --------------------------------------------------------------
+        # Restore Part 6
+        # --------------------------------------------------------------
+        self.query_state_enabled_var.set(
+            bool(part_6.get("state_enabled", False))
+        )
+        self.query_state_text.set(
+            str(part_6.get("state_value", ""))
+        )
+
+        self.query_nid_enabled_var.set(
+            bool(part_6.get("nid_enabled", False))
+        )
+        self.query_nid_text.set(
+            str(part_6.get("nid_value", ""))
+        )
+
+        self.query_river_enabled_var.set(
+            bool(part_6.get("river_enabled", False))
+        )
+        self.query_river_text.set(
+            str(part_6.get("river_value", ""))
+        )
+
+        self._update_cascade_query_control_states()
+
+        restored_query_ids = part_6.get(
+            "last_query_system_ids",
+            [],
+        )
+
+        if not isinstance(restored_query_ids, list):
+            restored_query_ids = []
+
+        self.last_cascade_query_system_ids = [
+            system_id
+            for system_id in restored_query_ids
+            if isinstance(system_id, str)
+            and system_id in self.cascade_graphs
+        ]
+
+        if self.cascade_graphs:
+            available_system_ids = sorted(
+                self.cascade_graphs.keys()
+            )
+
+            self.cascade_system_combobox.configure(
+                values=available_system_ids
+            )
+
+            if self.last_cascade_query_system_ids:
+                self._display_cascade_query_matches(
+                    self.last_cascade_query_system_ids
+                )
+                self.selected_system_id_text.set(
+                    self.last_cascade_query_system_ids[0]
+                )
+            else:
+                self._display_cascade_query_matches(
+                    available_system_ids
+                )
+                self.selected_system_id_text.set(
+                    available_system_ids[0]
+                )
+
+            self._update_selected_system_details()
+
+        self.current_study_name = study_name
+        self.current_study_file = study_file
+        self.study_name_text.set(study_name)
+        self.study_selector_text.set(study_name)
+        self.save_study_button.configure(state=tk.NORMAL)
+
+        self._append_log(
+            f"Loaded case study '{study_name}' from {study_file}"
+        )
 
     @staticmethod
     def _node_id_matches(stored_node_id: object, requested_node_id: int) -> bool:
@@ -5931,6 +6859,17 @@ class CascadeResearchApp(tk.Tk):
                     # Save the initialized graph, mappings, and matched dam
                     # inventory for use by the later workflow tabs.
                     self.initialization_result = payload
+
+                    # The fingerprint is used when saving/loading named case
+                    # studies to detect whether the NHD/NID matching context
+                    # differs from the context used to create a study.
+                    self.current_initialization_fingerprint = (
+                        compute_initialization_fingerprint(payload)
+                    )
+
+                    # A named study can now be saved because Part 1 has
+                    # established the baseline NHD/NID context.
+                    self.save_study_button.configure(state=tk.NORMAL)
 
                     # Populate the Part 1 statistics display.
                     self._display_statistics(payload.statistics)
