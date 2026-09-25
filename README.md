@@ -55,6 +55,7 @@ cascade-research-tool/
 ├── .gitignore
 └── README.md
 ```
+
 Setup and Installation
 =
 This project uses uv for dependency and environment management.
@@ -67,6 +68,7 @@ Create the local virtual environment and install the locked dependencies.
 ```bash
 uv sync --locked
 ```
+
 Python Requirement
 =
 The project currently declares Python 3.10 or newer. Use the Python-version range documented in pyproject.toml.
@@ -81,7 +83,9 @@ OR For an activated pip-managed virtual environment, run:
 ```bash
 python Script/run_application.py
 ```
+
 First-Time Use
+=
 The first initialization may take several minutes because the application retrieves or builds the required national datasets and creates a private user-local cache.
 
 Application Workflow
@@ -94,6 +98,7 @@ Search by:
 
 NHD network node ID, to list matched dam records at that node;
 NID ID, to identify a dam’s mapped NHD node and purposes.
+
 Results are written to the shared application log.
 
 Part 3 — Filter Dams
@@ -110,7 +115,9 @@ $$ \text{Estimated Power Capacity} =
 
 The automatic baseline rule retains primary NID dam records where:
 NID ID = Federal ID
+
 Part 4 — Search Downstream Dams
+
 Searches downstream from every matched primary dam and records the nearest reachable downstream dam within a user-selected river-distance limit.
 
 The resulting direct downstream-dam reference table is stored as an application-managed artifact and may optionally be exported as CSV.
@@ -120,10 +127,12 @@ Builds directed cascade systems from:
 
 Part 3 selected and matched candidate dams;
 Part 4 direct downstream dam relationships.
+
 Users can configure:
 
 minimum hydroelectric dams per final cascade system;
 optional same-owner continuity from each root dam.
+
 Converging dam chains are merged into connected systems before the minimum hydroelectric-dam requirement is evaluated.
 
 Part 6 — Query and Visualize Cascades
@@ -151,6 +160,7 @@ Part 3 filter choices and filtered inventories;
 Part 4 downstream links;
 Part 5 cascade graphs, edge lists, summaries, and settings;
 Part 6 query settings and latest query-result system IDs.
+
 Case studies do not duplicate the full NHD graph or baseline NID inventory. Those common datasets are restored through Part 1 initialization.
 
 If a requested study name already exists after filename normalization, the application asks whether the existing study should be overwritten.
