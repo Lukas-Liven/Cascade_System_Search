@@ -5,6 +5,7 @@ The application uses the enhanced National Hydrography Dataset river network, Na
 
 Repository Structure
 =
+'''
 cascade-research-tool/
 ├── Script/
 │   └── run_application.py          # Primary application launcher
@@ -53,7 +54,7 @@ cascade-research-tool/
 ├── requirements.txt                # Generated pip-compatible requirements
 ├── .gitignore
 └── README.md
-
+'''
 Setup and Installation
 =
 This project uses uv for dependency and environment management.
