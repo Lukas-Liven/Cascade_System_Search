@@ -5,7 +5,7 @@ The application uses the enhanced National Hydrography Dataset river network, Na
 
 Repository Structure
 =
-'''
+```text
 cascade-research-tool/
 ├── Script/
 │   └── run_application.py          # Primary application launcher
@@ -54,18 +54,19 @@ cascade-research-tool/
 ├── requirements.txt                # Generated pip-compatible requirements
 ├── .gitignore
 └── README.md
-'''
+```
 Setup and Installation
 =
 This project uses uv for dependency and environment management.
 Clone the repository and navigate to its root directory.
-
+```bash
 git clone https://github.com/Lukas-Liven/Cascade_System_Search
 cd cascade-research-tool
-
+```
 Create the local virtual environment and install the locked dependencies.
+```bash
 uv sync --locked
-
+```
 Python Requirement
 =
 The project currently declares Python 3.10 or newer. Use the Python-version range documented in pyproject.toml.
@@ -73,13 +74,13 @@ The project currently declares Python 3.10 or newer. Use the Python-version rang
 Execution
 =
 Launch the application from the repository root.
-
+```bash
 uv run python Script/run_application.py
-
+```
 OR For an activated pip-managed virtual environment, run:
-
+```bash
 python Script/run_application.py
-
+```
 First-Time Use
 The first initialization may take several minutes because the application retrieves or builds the required national datasets and creates a private user-local cache.
 
