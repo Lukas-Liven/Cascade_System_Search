@@ -4,6 +4,7 @@ This repository contains a modular desktop research application for identifying,
 The application uses the enhanced National Hydrography Dataset river network, National Inventory of Dams records, GeoConnex dam mappings, and the ResNet crosswalk to associate dams with river-network nodes. It then supports downstream dam-link analysis, cascade-system construction, case-study persistence, CSV export, and interactive map generation.
 
 Repository Structure
+=
 cascade-research-tool/
 ├── Script/
 │   └── run_application.py          # Primary application launcher
@@ -55,9 +56,6 @@ cascade-research-tool/
 
 Setup and Installation
 This project uses uv for dependency and environment management.
-
-Install uv by following Astral’s installation instructions. [1]
-
 Clone the repository and navigate to its root directory.
 
 git clone https://github.com/Lukas-Liven/Cascade_System_Search
@@ -104,11 +102,7 @@ $$ \text{Estimated Power Capacity} =
 \frac{ \text{Hydraulic Height} \times \text{Maximum Discharge} }{ 11800 } $$
 
 The automatic baseline rule retains primary NID dam records where:
-
-NID ID
-=
-Federal ID
-NID ID=Federal ID
+NID ID = Federal ID
 Part 4 — Search Downstream Dams
 Searches downstream from every matched primary dam and records the nearest reachable downstream dam within a user-selected river-distance limit.
 
