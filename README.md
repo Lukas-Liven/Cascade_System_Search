@@ -1,4 +1,4 @@
-Cascade Research Tool
+# Cascade Research Tool
 This repository contains a modular desktop research application for identifying, constructing, querying, and visualizing cascading dam systems across the Continental United States.
 
 The application uses the enhanced National Hydrography Dataset river network, National Inventory of Dams records, GeoConnex dam mappings, and the ResNet crosswalk to associate dams with river-network nodes. It then supports downstream dam-link analysis, cascade-system construction, case-study persistence, CSV export, and interactive map generation.
