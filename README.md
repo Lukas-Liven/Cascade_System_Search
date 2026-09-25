@@ -102,6 +102,7 @@ Filter primary dam records using:
 minimum maximum storage;
 optional hydroelectric-purpose selection;
 optional estimated power-capacity threshold.
+
 The estimated power calculation is:
 
 $$ \text{Estimated Power Capacity} = 
@@ -131,6 +132,7 @@ Query constructed systems by:
 state;
 exact NID ID;
 partial river or stream name.
+
 Query criteria use system-level AND logic. The application can:
 
 print selected system details to the shared log;
