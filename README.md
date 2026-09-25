@@ -55,6 +55,7 @@ cascade-research-tool/
 └── README.md
 
 Setup and Installation
+=
 This project uses uv for dependency and environment management.
 Clone the repository and navigate to its root directory.
 
@@ -65,9 +66,11 @@ Create the local virtual environment and install the locked dependencies.
 uv sync --locked
 
 Python Requirement
+=
 The project currently declares Python 3.10 or newer. Use the Python-version range documented in pyproject.toml.
 
 Execution
+=
 Launch the application from the repository root.
 
 uv run python Script/run_application.py
@@ -80,6 +83,7 @@ First-Time Use
 The first initialization may take several minutes because the application retrieves or builds the required national datasets and creates a private user-local cache.
 
 Application Workflow
+=
 Part 1 — Initialize Data
 Downloads or loads cached NHD, GeoConnex, ResNet, and NID data, then maps NID dams to NHD network nodes.
 
@@ -134,6 +138,7 @@ show optional river-distance labels on overview maps.
 Generated interactive maps use the USGS National Map USGS Topo basemap service.
 
 Case Studies
+=
 The application supports named case studies for saving researcher-specific workflow output.
 
 A case study can preserve:
@@ -147,4 +152,5 @@ Case studies do not duplicate the full NHD graph or baseline NID inventory. Thos
 If a requested study name already exists after filename normalization, the application asks whether the existing study should be overwritten.
 
 Local Data and Cache Behavior
+=
 The application stores downloaded data and generated artifacts in a user-local cache directory rather than inside the repository. Follow the file locations displayed in the application to locate files for use outside of runtime.
