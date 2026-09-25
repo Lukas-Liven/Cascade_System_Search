@@ -100,7 +100,7 @@ optional hydroelectric-purpose selection;
 optional estimated power-capacity threshold.
 The estimated power calculation is:
 
-$$ \text{Estimated Power Capacity}
+$$ \text{Estimated Power Capacity} = 
 \frac{ \text{Hydraulic Height} \times \text{Maximum Discharge} }{ 11800 } $$
 
 The automatic baseline rule retains primary NID dam records where:
