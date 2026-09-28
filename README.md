@@ -167,3 +167,9 @@ If a requested study name already exists after filename normalization, the appli
 Local Data and Cache Behavior
 =
 The application stores downloaded data and generated artifacts in a user-local cache directory rather than inside the repository. Follow the file locations displayed in the application to locate files for use outside of runtime.
+
+Development Information
+=
+Principal investigator: Quentin Ploussard, Argonne National Laboratory (qploussard@anl.gov)
+Main developer: Lukas Livengood, Argonne National Laboratory (llivengood@anl.gov)
+Funding source: This work was authored for the Department of Energy (DOE) Office of Critical Minerals and Energy Innovation by Argonne National Laboratory, operated by UChicago Argonne LLC under contract number DE-AC02-06CH11357. This study was supported by the HydroWIRES Initiative of DOE’s Hydropower and Hydrokinetics Office.
