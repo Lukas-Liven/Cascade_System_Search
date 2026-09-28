@@ -51,7 +51,6 @@ cascade-research-tool/
 │
 ├── pyproject.toml                  # Project metadata and direct dependencies
 ├── uv.lock                         # Locked dependency resolution
-├── requirements.txt                # Generated pip-compatible requirements
 └── README.md
 ```
 
