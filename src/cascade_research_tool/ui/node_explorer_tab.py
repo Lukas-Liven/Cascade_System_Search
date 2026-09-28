@@ -73,7 +73,7 @@ class NodeExplorerTab:
 
         ttk.Label(
             self.frame,
-            text="Part 2: Explore Dams at an NHD Network Node",
+            text="Part 2: Explore Dams at an NHD Network Node (OPTIONAL)",
             font=("TkDefaultFont", 13, "bold"),
         ).pack(anchor=tk.W)
 

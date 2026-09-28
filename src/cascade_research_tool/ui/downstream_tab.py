@@ -96,7 +96,7 @@ class DownstreamTab:
 
         ttk.Label(
             search_settings_frame,
-            text="Maximum downstream search distance (miles):",
+            text="Maximum downstream search distance (river miles):",
         ).grid(
             row=0,
             column=0,

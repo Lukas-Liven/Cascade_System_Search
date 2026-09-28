@@ -1023,6 +1023,8 @@ class CascadeResearchApp(tk.Tk):
                 self.downstream_links_cache_path
             )
 
+            self.downstream_tab_view.set_export_enabled(enabled=True)
+
             self.cascade_builder_tab_view.set_edge_export_enabled(
                 enabled=True
             )
@@ -1102,9 +1104,6 @@ class CascadeResearchApp(tk.Tk):
             self.state.cascade_systems_cache_file = (
                 self.cascade_systems_cache_path
             )
-
-            self.cascade_builder_tab_view.set_edge_export_enabled(enabled=True)
-            self.cascade_builder_tab_view.set_summary_export_enabled(enabled=True)
 
             self.cascade_systems_csv_path_text.set(
                 f"Restored from study: {study_file.name}"
