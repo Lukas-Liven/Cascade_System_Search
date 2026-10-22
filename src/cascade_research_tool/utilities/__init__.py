@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Shared utility modules for the Cascade Research Tool.
 
 Utility modules must remain independent of Tkinter windows, worker threads,

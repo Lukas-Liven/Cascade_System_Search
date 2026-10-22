@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Part 3 dam filtering service.
 
 This module contains the data-processing portion of the dam filter workflow.

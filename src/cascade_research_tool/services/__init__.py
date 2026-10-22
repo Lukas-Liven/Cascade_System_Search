@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Application service layer.
 
 Service modules implement data acquisition, caching, persistence, validation,

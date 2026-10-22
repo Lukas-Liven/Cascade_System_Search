@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Map and display helper utilities.
 
 These helpers do not create Folium maps, access Tkinter, open browsers, or

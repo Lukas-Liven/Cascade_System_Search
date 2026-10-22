@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Downstream dam-link search service.
 
 This module contains the graph-traversal logic used by Part 4 to locate the

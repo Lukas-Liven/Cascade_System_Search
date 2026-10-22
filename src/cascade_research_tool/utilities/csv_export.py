@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Safe CSV export utilities.
 
 CSV values can be interpreted as formulas by spreadsheet applications such as

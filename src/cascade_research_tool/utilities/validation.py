@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Input-validation utilities.
 
 These functions validate application configuration values without depending on

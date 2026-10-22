@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Cascade-system construction service.
 
 This module implements the Part 5 analysis algorithm independently from the

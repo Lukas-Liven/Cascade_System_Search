@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Part 1 initialization service.
 
 This module acquires, validates, caches, and maps the NHD, GeoConnex, ResNet,

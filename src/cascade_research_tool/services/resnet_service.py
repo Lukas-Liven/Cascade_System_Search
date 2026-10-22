@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 ResNet crosswalk metadata, download, and checksum-validation service.
 
 This module retrieves the configured ResNet file from Zenodo over HTTPS,

@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Main Tkinter window controller for the Cascade Research Tool.
 
 This module coordinates application state, workflow tabs, background workers,

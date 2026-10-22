@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Part 4 downstream dam-link construction service.
 
 This module transforms the initialized matched dam inventory and NHD river

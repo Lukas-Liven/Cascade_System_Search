@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Tkinter user-interface components for the Cascade Research Tool.
 
 UI modules create and update widgets but do not perform data acquisition,

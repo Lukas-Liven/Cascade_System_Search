@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Application startup entry point.
 
 This module configures runtime dependencies before importing the main Tkinter

@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Application session-state model.
 
 This module contains the current research data and workflow outputs for one

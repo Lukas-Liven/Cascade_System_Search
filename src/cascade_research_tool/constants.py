@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Centralized application constants.
 
 This module must contain values only: no network calls, file-system writes,

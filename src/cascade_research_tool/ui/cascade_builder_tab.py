@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Part 5 cascade-construction user interface.
 
 This module owns widget construction, button state, and summary-table display

@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Part 2 dam and NHD-network node lookup service.
 
 This module provides DataFrame lookup logic used by the node-explorer tab.

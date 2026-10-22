@@ -1,4 +1,7 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
+
 Primary repository launcher for the Cascade Research Tool.
 
 Run this file from the repository root:

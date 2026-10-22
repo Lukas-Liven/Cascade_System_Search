@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Runtime environment configuration.
 
 The HyRiver dependency chain can import aiohttp components that select the

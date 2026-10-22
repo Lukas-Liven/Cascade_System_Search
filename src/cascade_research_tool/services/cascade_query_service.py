@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Part 6 cascade-system query service.
 
 This module evaluates constructed NetworkX cascade graphs against state, NID

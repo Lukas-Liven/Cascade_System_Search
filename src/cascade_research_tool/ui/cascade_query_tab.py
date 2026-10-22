@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Part 6 cascade-query user interface.
 
 This module owns Tkinter widget creation and view presentation for querying,

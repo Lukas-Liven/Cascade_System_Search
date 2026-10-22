@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Part 1 initialization-tab user interface.
 
 This module owns only Tkinter widget construction and presentation for the

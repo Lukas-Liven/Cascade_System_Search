@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Application-managed cache and artifact persistence services.
 
 This module contains the controlled persistence boundary for the Cascade

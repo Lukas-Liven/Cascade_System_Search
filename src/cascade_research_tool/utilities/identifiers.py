@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Identifier and case-study-name normalization utilities.
 
 These functions establish canonical representations used across initialization,

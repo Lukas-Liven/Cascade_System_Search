@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Case-study management user-interface component.
 
 This module owns the Tkinter controls used to create, save, select, load, and

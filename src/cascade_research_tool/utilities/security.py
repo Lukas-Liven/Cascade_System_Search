@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Security-focused filesystem utilities.
 
 These helpers enforce defense-in-depth controls for application-managed local

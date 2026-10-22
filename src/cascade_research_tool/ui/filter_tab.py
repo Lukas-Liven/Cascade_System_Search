@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Part 3 dam-filter user interface.
 
 This module owns Tkinter widget construction and result presentation for the

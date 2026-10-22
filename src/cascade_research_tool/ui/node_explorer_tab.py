@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Part 2 node-explorer user interface.
 
 This module creates the Tkinter controls for NHD node and NID ID lookup.

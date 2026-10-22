@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Application-specific exception types.
 
 Services and utilities raise these exceptions to make expected validation and

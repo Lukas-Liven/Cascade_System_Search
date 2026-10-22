@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Typed data models shared between application services and user-interface code.
 
 These models contain application data only. They must not contain Tkinter

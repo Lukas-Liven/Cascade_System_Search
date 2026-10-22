@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Case-study persistence service.
 
 Case studies are application-managed pickle artifacts stored only beneath the

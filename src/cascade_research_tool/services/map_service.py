@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Folium map-generation service for cascade-system visualizations.
 
 This module creates local interactive HTML maps from already constructed

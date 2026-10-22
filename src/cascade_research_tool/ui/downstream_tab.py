@@ -1,4 +1,6 @@
 """
+Copyright © 2026, UChicago Argonne, LLC
+All Rights Reserved
 Part 4 downstream-search user interface.
 
 This module owns Tkinter widget construction and result presentation for the
