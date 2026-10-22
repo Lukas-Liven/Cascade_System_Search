@@ -173,4 +173,22 @@ Principal investigator: Quentin Ploussard, Argonne National Laboratory (qploussa
 
 Main developer: Lukas Livengood, Argonne National Laboratory (llivengood@anl.gov)
 
+MIT License
+=
+Copyright © 2026, UChicago Argonne, LLC
+
+All Rights Reserved
+
+Software Name: Cascade System Search
+
+By: UChicago Argonne, LLC
+
+OPEN SOURCE LICENSE (MIT)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+· The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 Funding source: This work was authored for the Department of Energy (DOE) Office of Critical Minerals and Energy Innovation by Argonne National Laboratory, operated by UChicago Argonne LLC under contract number DE-AC02-06CH11357. This study was supported by the HydroWIRES Initiative of DOE’s Hydropower and Hydrokinetics Office.
